@@ -1,0 +1,16 @@
+{
+  "name": "impostor-manhunt",
+  "private": true,
+  "packageManager": "npm@11.17.0",
+  "workspaces": [
+    "frontend",
+    "backend",
+    "api"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:backend": "npm run dev --workspace=backend",
+    "build:api": "npm run build --workspace=api",
+    "typecheck": "npm run build:api && npm run typecheck --workspace=frontend && npm run typecheck --workspace=backend && npm run typecheck --workspace=api"
+  }
+}

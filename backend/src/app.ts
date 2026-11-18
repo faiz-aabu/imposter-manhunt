@@ -1,0 +1,250 @@
+import express from "express";
+import type {
+  ErrorRequestHandler,
+  RequestHandler,
+  Response,
+} from "express";
+import { roomCodeSchema } from "@impostor/api";
+import type {
+  ApiErrorCode,
+  GetHealthResponse,
+  GetRoomResponse,
+  RestErrorResponse,
+} from "@impostor/api";
+import type { BackendConfig } from "./config/env.js";
+import { RoomService } from "./rooms/room-service.js";
+import { AppError } from "./utils/app-error.js";
+import { isOriginAllowed } from "./utils/cors.js";
+import { isSecureTransport } from "./utils/transport.js";
+
+export function createApp(
+  config: BackendConfig,
+  rooms: RoomService,
+): express.Express {
+  const app = express();
+  app.set(
+    "trust proxy",
+    config.clientIpMode === "railway" ? false : config.trustProxyHops,
+  );
+  app.disable("x-powered-by");
+  app.use(createSecurityHeaders(config));
+  app.use(createHttpsMiddleware(config));
+  app.use(createCorsMiddleware(config));
+  app.use(express.json({ limit: "16kb" }));
+
+  app.get("/health", (_request, response: Response<GetHealthResponse>) => {
+    response.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  app.get(
+    "/rooms/:code",
+    (request, response: Response<GetRoomResponse | RestErrorResponse>, next) => {
+      const parsedCode = roomCodeSchema.safeParse(request.params.code);
+      if (!parsedCode.success) {
+        response.status(400).json({
+          error: {
+            code: "INVALID_PAYLOAD",
+            message: "Room code is invalid.",
+          },
+        });
+        return;
+      }
+
+      const room = rooms.getPublicRoom(parsedCode.data);
+      if (!room) {
+        response.status(404).json({
+          error: {
+            code: "ROOM_NOT_FOUND",
+            message: "Room does not exist.",
+          },
+        });
+        return;
+      }
+
+      try {
+        response.json(room satisfies GetRoomResponse);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.use((_request, response: Response<RestErrorResponse>) => {
+    response.status(404).json({
+      error: {
+        code: "UNKNOWN",
+        message: "Route does not exist.",
+      },
+    });
+  });
+  app.use(createErrorHandler(config));
+
+  return app;
+}
+
+function createSecurityHeaders(config: BackendConfig): RequestHandler {
+  return (request, response, next) => {
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader(
+      "Permissions-Policy",
+      "camera=(), geolocation=(), microphone=()",
+    );
+    response.setHeader("Cache-Control", "no-store");
+    if (
+      config.requireHttps &&
+      isSecureTransport(
+        request,
+        config.clientIpMode,
+        config.trustProxyHops,
+      )
+    ) {
+      response.setHeader("Strict-Transport-Security", "max-age=31536000");
+    }
+    next();
+  };
+}
+
+function createHttpsMiddleware(config: BackendConfig): RequestHandler {
+  return (request, response, next) => {
+    if (
+      !config.requireHttps ||
+      request.path === "/health" ||
+      isSecureTransport(
+        request,
+        config.clientIpMode,
+        config.trustProxyHops,
+      )
+    ) {
+      next();
+      return;
+    }
+
+    sendRestError(
+      response,
+      426,
+      "NOT_AUTHORIZED",
+      "HTTPS is required.",
+    );
+  };
+}
+
+function createCorsMiddleware(config: BackendConfig): RequestHandler {
+  return (request, response, next) => {
+    const origin = request.get("origin");
+    if (!isOriginAllowed(origin, config.allowedOrigins)) {
+      next(
+        new AppError("NOT_AUTHORIZED", "Origin is not allowed.", 403),
+      );
+      return;
+    }
+
+    if (origin) {
+      response.setHeader(
+        "Access-Control-Allow-Origin",
+        config.allowedOrigins.includes("*") ? "*" : origin,
+      );
+      response.setHeader("Vary", "Origin");
+    }
+    response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    response.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization",
+    );
+    response.setHeader("Access-Control-Max-Age", "600");
+
+    if (request.method === "OPTIONS") {
+      response.sendStatus(204);
+      return;
+    }
+    next();
+  };
+}
+
+function createErrorHandler(config: BackendConfig): ErrorRequestHandler {
+  return (error: unknown, _request, response, next) => {
+    if (response.headersSent) {
+      next(error);
+      return;
+    }
+
+    if (error instanceof AppError) {
+      sendRestError(response, error.statusCode, error.code, error.message);
+      return;
+    }
+
+    if (isJsonParseError(error)) {
+      sendRestError(
+        response,
+        400,
+        "INVALID_PAYLOAD",
+        "Request body must contain valid JSON.",
+      );
+      return;
+    }
+
+    if (isEntityTooLargeError(error)) {
+      sendRestError(
+        response,
+        413,
+        "INVALID_PAYLOAD",
+        "Request body exceeds the allowed size.",
+      );
+      return;
+    }
+
+    console.error(JSON.stringify({
+      level: "error",
+      message: "Unhandled HTTP request error.",
+      ...(config.nodeEnv === "production"
+        ? {}
+        : {
+            error: error instanceof Error ? error.stack ?? error.message : String(error),
+          }),
+    }));
+    sendRestError(
+      response,
+      500,
+      "UNKNOWN",
+      "An unexpected server error occurred.",
+    );
+  };
+}
+
+function isEntityTooLargeError(
+  error: unknown,
+): error is { type: "entity.too.large" } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    error.type === "entity.too.large"
+  );
+}
+
+function sendRestError(
+  response: Response<RestErrorResponse>,
+  statusCode: number,
+  code: ApiErrorCode,
+  message: string,
+): void {
+  response.status(statusCode).json({
+    error: { code, message },
+  });
+}
+
+function isJsonParseError(
+  error: unknown,
+): error is { type: "entity.parse.failed" } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "type" in error &&
+    error.type === "entity.parse.failed"
+  );
+}
+

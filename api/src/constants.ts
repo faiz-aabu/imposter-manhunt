@@ -1,0 +1,50 @@
+export const GAME_MODES = [
+  "impostor-classic",
+  "impostor-word",
+  "manhunt",
+] as const;
+
+export const MIN_PLAYERS_PER_ROOM = 2;
+export const MAX_PLAYERS_PER_ROOM = 12;
+
+export const MIN_CLASSIC_IMPOSTOR_PLAYERS = 3;
+export const DEFAULT_IMPOSTOR_COUNT = 1;
+export const MIN_WORD_IMPOSTOR_PLAYERS = 3;
+export const DEFAULT_WORD_IMPOSTOR_COUNT = 1;
+export const WORD_IMPOSTOR_CATEGORIES = [
+  "animals",
+  "food",
+  "places",
+  "objects",
+] as const;
+export const DEFAULT_WORD_IMPOSTOR_CATEGORY = "animals";
+export const MIN_DISCUSSION_DURATION_SECONDS = 30;
+export const MAX_DISCUSSION_DURATION_SECONDS = 600;
+export const DEFAULT_DISCUSSION_DURATION_SECONDS = 120;
+export const MIN_VOTING_DURATION_SECONDS = 10;
+export const MAX_VOTING_DURATION_SECONDS = 120;
+export const DEFAULT_VOTING_DURATION_SECONDS = 30;
+export const ROLE_REVEAL_DURATION_SECONDS = 5;
+
+export const ROOM_CODE_LENGTH = 4;
+export const ROOM_CODE_PATTERN = new RegExp(`^[A-Z]{${ROOM_CODE_LENGTH}}$`);
+
+export const NICKNAME_MIN_LENGTH = 1;
+export const NICKNAME_MAX_LENGTH = 20;
+
+export const MAX_PLAYER_ID_LENGTH = 128;
+export const MAX_LOCATION_ACCURACY_METERS = 10_000;
+export const MIN_MANHUNT_HUNTERS = 1;
+export const MIN_MANHUNT_BOUNDARY_RADIUS_METERS = 100;
+export const MAX_MANHUNT_BOUNDARY_RADIUS_METERS = 1_000;
+
+export const MANHUNT_LOCATION_FLASH_INTERVAL_SECONDS = 20;
+export const MANHUNT_LOCATION_REVEAL_DURATION_SECONDS = 5;
+export const MANHUNT_COUNTDOWN_DURATION_SECONDS = 10;
+export const MANHUNT_CATCH_DISTANCE_METERS = 1.5;
+export const MANHUNT_LOCATION_MAX_AGE_SECONDS = 15;
+export const MANHUNT_CATCH_REQUEST_DURATION_SECONDS = 15;
+export const MANHUNT_CATCH_NOTIFICATION_DURATION_SECONDS = 7;
+export const MANHUNT_PROXIMITY_NEAR_METERS = 10;
+export const MANHUNT_PROXIMITY_STRONG_METERS = 5;
+export const MANHUNT_PROXIMITY_COOLDOWN_SECONDS = 10;

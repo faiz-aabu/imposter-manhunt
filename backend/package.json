@@ -1,0 +1,31 @@
+{
+  "name": "@impostor/backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "predev": "npm --prefix .. run build:api",
+    "dev": "tsx watch src/index.ts",
+    "prebuild": "npm --prefix .. run build:api",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm --prefix .. run build:api",
+    "test": "tsx --test src/config/env.test.ts src/utils/client-ip.test.ts src/rooms/room-service.test.ts src/games/imposter/classic-game-service.test.ts src/games/imposter/word-game-service.test.ts src/manhunt/manhunt-game-service.test.ts src/server.test.ts"
+  },
+  "dependencies": {
+    "@impostor/api": "*",
+    "express": "^5.3.0",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.0",
+    "socket.io-client": "^4.8.4",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.3"
+  }
+}
