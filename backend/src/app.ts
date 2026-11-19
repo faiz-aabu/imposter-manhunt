@@ -4,24 +4,39 @@ import type {
   RequestHandler,
   Response,
 } from "express";
-import { roomCodeSchema } from "@impostor/api";
+import {
+  createGuestProfileSchema,
+  restoreGuestProfileSchema,
+  roomCodeSchema,
+} from "@impostor/api";
 import type {
   ApiErrorCode,
+  CreateGuestProfileResponse,
   GetHealthResponse,
   GetRoomResponse,
   RestErrorResponse,
+  RestoreGuestProfileResponse,
 } from "@impostor/api";
 import type { BackendConfig } from "./config/env.js";
+import { GuestProfileService } from "./guest-profiles/guest-profile-service.js";
 import { RoomService } from "./rooms/room-service.js";
+import { InMemoryRateLimiter } from "./services/rate-limiter.js";
 import { AppError } from "./utils/app-error.js";
+import { getClientIp } from "./utils/client-ip.js";
 import { isOriginAllowed } from "./utils/cors.js";
 import { isSecureTransport } from "./utils/transport.js";
+
+const GUEST_PROFILE_RATE_LIMIT_WINDOW_MS = 60_000;
+const GUEST_PROFILE_CREATE_LIMIT = 5;
+const GUEST_PROFILE_RESTORE_LIMIT = 12;
 
 export function createApp(
   config: BackendConfig,
   rooms: RoomService,
+  guestProfiles = new GuestProfileService(config.guestProfiles),
 ): express.Express {
   const app = express();
+  const guestProfileRateLimiter = new InMemoryRateLimiter();
   app.set(
     "trust proxy",
     config.clientIpMode === "railway" ? false : config.trustProxyHops,
@@ -38,6 +53,69 @@ export function createApp(
       timestamp: new Date().toISOString(),
     });
   });
+
+  app.post(
+    "/guest-profiles",
+    async (
+      request,
+      response: Response<CreateGuestProfileResponse | RestErrorResponse>,
+      next,
+    ) => {
+      try {
+        requireGuestProfileFeature(guestProfiles);
+        consumeGuestProfileRateLimit(
+          request,
+          config,
+          guestProfileRateLimiter,
+          "create",
+          GUEST_PROFILE_CREATE_LIMIT,
+        );
+        const parsed = createGuestProfileSchema.safeParse(request.body);
+        if (!parsed.success) {
+          throw new AppError(
+            "INVALID_PAYLOAD",
+            "Guest profile request is invalid.",
+          );
+        }
+
+        const created = await guestProfiles.create(parsed.data.nickname);
+        response.status(201).json(created);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  app.post(
+    "/guest-profiles/restore",
+    async (
+      request,
+      response: Response<RestoreGuestProfileResponse | RestErrorResponse>,
+      next,
+    ) => {
+      try {
+        requireGuestProfileFeature(guestProfiles);
+        consumeGuestProfileRateLimit(
+          request,
+          config,
+          guestProfileRateLimiter,
+          "restore",
+          GUEST_PROFILE_RESTORE_LIMIT,
+        );
+        const parsed = restoreGuestProfileSchema.safeParse(request.body);
+        if (!parsed.success) {
+          throw new AppError(
+            "INVALID_PAYLOAD",
+            "Guest profile restoration request is invalid.",
+          );
+        }
+
+        response.json(await guestProfiles.restore(parsed.data.credential));
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   app.get(
     "/rooms/:code",
@@ -83,6 +161,50 @@ export function createApp(
   app.use(createErrorHandler(config));
 
   return app;
+}
+
+function requireGuestProfileFeature(
+  guestProfiles: GuestProfileService,
+): void {
+  if (!guestProfiles.isConfigured) {
+    throw new AppError(
+      "FEATURE_UNAVAILABLE",
+      "Guest profiles are not configured on this server.",
+    );
+  }
+}
+
+function consumeGuestProfileRateLimit(
+  request: express.Request,
+  config: BackendConfig,
+  limiter: InMemoryRateLimiter,
+  action: "create" | "restore",
+  limit: number,
+): void {
+  const clientIp = getClientIp(
+    request.headers,
+    request.socket.remoteAddress,
+    config.clientIpMode,
+    config.trustProxyHops,
+  );
+  if (!clientIp) {
+    throw new AppError(
+      "NOT_AUTHORIZED",
+      "The client address could not be determined.",
+    );
+  }
+  if (
+    !limiter.consume(
+      `guest-profile:${action}:${clientIp}`,
+      limit,
+      GUEST_PROFILE_RATE_LIMIT_WINDOW_MS,
+    )
+  ) {
+    throw new AppError(
+      "RATE_LIMITED",
+      "Too many guest profile requests. Please try again later.",
+    );
+  }
 }
 
 function createSecurityHeaders(config: BackendConfig): RequestHandler {

@@ -90,15 +90,25 @@ Other `RAILWAY_*` variables are not required by this backend.
 | `ALLOWED_ORIGINS` | Required by production startup. Set to a comma-separated list of exact HTTPS origins. The value cannot be finalized until the Railway domain is generated. If only native mobile clients are used initially, use the actual HTTPS API origin to satisfy startup validation; add any browser frontend's exact HTTPS origin if one is deployed later. |
 | `CLIENT_IP_MODE` | Set explicitly to `railway`. The backend also checks Railway's `RAILWAY_SERVICE_ID` marker and refuses startup if Railway is detected but this mode is not selected. |
 | `TRUST_PROXY_HOPS` | Do not set this in Railway mode; the backend rejects it if present. It is only for the existing numeric-hop behavior on other reverse-proxy providers. |
+| `SUPABASE_URL` | Optional. Set to the Supabase project URL to enable persistent guest profiles. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Optional server-only secret. Set together with `SUPABASE_URL`; store only in Railway's backend Variables settings. Never put it in frontend environment variables, commit it to Git, or expose it through an `EXPO_PUBLIC_` variable. |
 
 `RECONNECT_GRACE_PERIOD_MS` is optional and defaults to `120000`. Do not set it
 unless the reconnect window is intentionally being changed.
 
-The backend currently requires no application secrets or API keys. Never
-commit Railway account/project tokens, GitHub credentials, signing keys, or
-future application secrets. Store any future secret only in Railway's secret
-variable facility. `EXPO_PUBLIC_API_URL` is a public frontend setting, not a
-secret and not a backend variable.
+Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` together only if
+persistent guest-profile creation and restoration are being enabled. Both the
+initial player-data migration and the guest-profile RPC migration must be
+applied before enabling this feature. If these variables are absent, only the
+persistent guest-profile endpoints remain unavailable; room creation, joining,
+Socket.IO, and existing guest gameplay continue to work normally.
+
+The guest-profile rate limiter is in memory and per instance. Keep the
+single-replica recommendation above unless rate limiting and the rest of the
+backend's in-memory state are coordinated across instances. Never commit
+Railway account/project tokens, GitHub credentials, signing keys, or other
+secrets. `EXPO_PUBLIC_API_URL` is a public frontend setting, not a secret and
+not a backend variable.
 
 ### Railway client-IP trust boundary
 

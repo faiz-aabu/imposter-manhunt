@@ -6,6 +6,12 @@ export interface BackendConfig {
   clientIpMode: "socket" | "railway";
   trustProxyHops: number;
   requireHttps: boolean;
+  guestProfiles: SupabaseGuestProfileConfig | null;
+}
+
+export interface SupabaseGuestProfileConfig {
+  url: string;
+  serviceRoleKey: string;
 }
 
 const DEFAULT_PORT = 3000;
@@ -121,6 +127,59 @@ function parseIntegerSetting(
   return parsed;
 }
 
+function parseGuestProfilesConfig(
+  environment: NodeJS.ProcessEnv,
+  nodeEnv: BackendConfig["nodeEnv"],
+): SupabaseGuestProfileConfig | null {
+  const urlValue = environment.SUPABASE_URL?.trim();
+  const serviceRoleKey = environment.SUPABASE_SERVICE_ROLE_KEY?.trim();
+
+  if (!urlValue && !serviceRoleKey) {
+    return null;
+  }
+  if (!urlValue || !serviceRoleKey) {
+    throw new Error(
+      "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured together.",
+    );
+  }
+  if (serviceRoleKey.startsWith("sb_publishable_")) {
+    throw new Error(
+      "SUPABASE_SERVICE_ROLE_KEY must be a server-only service-role key, not a publishable key.",
+    );
+  }
+
+  let url: URL;
+  try {
+    url = new URL(urlValue);
+  } catch {
+    throw new Error("SUPABASE_URL must be a valid HTTPS URL.");
+  }
+
+  const isLocalHttp =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]");
+  if (
+    (url.protocol !== "https:" && !isLocalHttp) ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error(
+      "SUPABASE_URL must be an HTTPS project origin (HTTP is allowed only for a local development instance).",
+    );
+  }
+
+  return {
+    url: url.origin,
+    serviceRoleKey,
+  };
+}
+
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): BackendConfig {
@@ -141,6 +200,7 @@ export function loadConfig(
   if (clientIpMode === "railway" && nodeEnv !== "production") {
     throw new Error("CLIENT_IP_MODE=railway is only valid in production.");
   }
+  const guestProfiles = parseGuestProfilesConfig(environment, nodeEnv);
 
   let trustProxyHops = 0;
   if (clientIpMode === "railway") {
@@ -178,5 +238,6 @@ export function loadConfig(
     clientIpMode,
     trustProxyHops,
     requireHttps: nodeEnv === "production",
+    guestProfiles,
   };
 }

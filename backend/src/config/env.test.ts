@@ -10,6 +10,52 @@ test("development config defaults to permissive origins and no trusted proxies",
   assert.deepEqual(config.allowedOrigins, ["*"]);
   assert.equal(config.trustProxyHops, 0);
   assert.equal(config.requireHttps, false);
+  assert.equal(config.guestProfiles, null);
+});
+
+test("guest profile Supabase configuration is optional but validated when supplied", () => {
+  const config = loadConfig({
+    SUPABASE_URL: "https://project.supabase.co",
+    SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
+  });
+  assert.deepEqual(config.guestProfiles, {
+    url: "https://project.supabase.co",
+    serviceRoleKey: "test-service-role-key",
+  });
+
+  assert.throws(
+    () => loadConfig({ SUPABASE_URL: "https://project.supabase.co" }),
+    /must be configured together/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
+      }),
+    /must be configured together/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SUPABASE_URL: "https://project.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "sb_publishable_test",
+      }),
+    /not a publishable key/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SUPABASE_URL: "http://project.supabase.co",
+        SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
+      }),
+    /HTTPS project origin/,
+  );
+
+  const localConfig = loadConfig({
+    SUPABASE_URL: "http://127.0.0.1:54321",
+    SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
+  });
+  assert.equal(localConfig.guestProfiles?.url, "http://127.0.0.1:54321");
 });
 
 test("socket proxy mode requires HTTPS origins and an explicit production hop count", () => {

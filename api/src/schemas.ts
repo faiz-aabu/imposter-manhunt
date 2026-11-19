@@ -51,6 +51,22 @@ export const nicknameSchema = z
   .min(NICKNAME_MIN_LENGTH)
   .max(NICKNAME_MAX_LENGTH);
 
+export const createGuestProfileSchema = z
+  .object({
+    nickname: nicknameSchema,
+  })
+  .strict();
+
+export const guestCredentialSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{43}$/);
+
+export const restoreGuestProfileSchema = z
+  .object({
+    credential: guestCredentialSchema,
+  })
+  .strict();
+
 export const roomCodeSchema = z
   .string()
   .trim()

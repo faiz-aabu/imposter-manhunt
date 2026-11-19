@@ -14,7 +14,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "pretest": "npm --prefix .. run build:api",
-    "test": "tsx --test src/config/env.test.ts src/utils/client-ip.test.ts src/rooms/room-service.test.ts src/games/imposter/classic-game-service.test.ts src/games/imposter/word-game-service.test.ts src/manhunt/manhunt-game-service.test.ts src/server.test.ts"
+    "test": "tsx --test src/config/env.test.ts src/utils/client-ip.test.ts src/rooms/room-service.test.ts src/games/imposter/classic-game-service.test.ts src/games/imposter/word-game-service.test.ts src/manhunt/manhunt-game-service.test.ts src/guest-profiles/guest-profile-service.test.ts src/server.test.ts"
   },
   "dependencies": {
     "@impostor/api": "*",

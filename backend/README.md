@@ -89,6 +89,49 @@ single-instance baseline, not as a distributed abuse-prevention control.
 Continue to use hosting-level network protections and monitor logs and service
 health before opening the service publicly.
 
+## Persistent guest profile foundation
+
+The optional backend endpoints `POST /guest-profiles` and
+`POST /guest-profiles/restore` create and restore persistent guest profiles.
+They are independent of room reconnect credentials; room creation, joining,
+leaving, and reconnecting do not require a guest profile.
+
+The feature is disabled unless both backend environment variables are set:
+
+| Variable | Guidance |
+| --- | --- |
+| `SUPABASE_URL` | Supabase project origin, using HTTPS in production. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only Supabase service-role key. Configure it only in the backend host's secret settings or backend `.env`; never put it in frontend configuration, `EXPO_PUBLIC_` variables, source control, or logs. |
+
+Creation returns a random 256-bit base64url credential once. The backend
+submits only its SHA-256 digest to the `create_guest_profile` database RPC.
+That function inserts the profile and credential in one transaction, so either
+both records are created or neither is. Apply the local RPC migration before
+deploying a backend version that calls it. Restoration hashes the presented
+credential and requires it to be unrevoked, unexpired, and associated with an
+active guest profile. Unknown, expired, and revoked credentials receive the
+same generic response. Credentials expire after one year; a future
+credential-renewal flow is needed before relying on long-lived guest recovery.
+
+A lost response after a creation request has reached the database can leave the
+outcome unknown. The endpoint warns that retrying may create a duplicate
+profile. The current schema has no durable idempotency key, and raw credentials
+are intentionally never stored, so safe replay of a creation request requires
+additional idempotency design and schema support. Clients should not
+automatically retry this ambiguous outcome.
+
+Both endpoints use the existing trusted client-IP strategy and process-local
+rate limiter (5 creation requests and 12 restoration requests per minute per
+client IP). Production requests remain subject to the backend's HTTPS
+enforcement, CORS policy, security headers, and no-store response header.
+Because the limiter is in memory, this protection is per-instance and resets
+on restart.
+
+Guest-profile configuration is optional: if both variables are absent, the
+backend starts and gameplay is unchanged, while these endpoints return a
+feature-unavailable response. Supplying only one variable or an invalid
+project URL fails configuration validation.
+
 ## Dependency audit note
 
 The current npm audit reports four moderate package entries for one transitive

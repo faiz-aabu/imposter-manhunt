@@ -44,6 +44,7 @@ const TEST_CONFIG: BackendConfig = {
   clientIpMode: "socket",
   trustProxyHops: 0,
   requireHttps: false,
+  guestProfiles: null,
 };
 
 async function createTestServer(

@@ -322,11 +322,14 @@ export type ApiErrorCode =
   | "ROOM_NOT_FOUND"
   | "ROOM_FULL"
   | "NOT_AUTHORIZED"
+  | "INVALID_CREDENTIAL"
   | "GAME_NOT_ACTIVE"
   | "GAME_NOT_READY"
   | "DUPLICATE_VOTE"
   | "INVALID_VOTE"
   | "INVALID_PAYLOAD"
+  | "FEATURE_UNAVAILABLE"
+  | "RATE_LIMITED"
   | "UNKNOWN";
 
 export interface ServerErrorPayload {

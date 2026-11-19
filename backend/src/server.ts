@@ -14,6 +14,7 @@ import { createApp } from "./app.js";
 import { ClassicImpostorService } from "./games/imposter/classic-game-service.js";
 import { WordImpostorService } from "./games/imposter/word-game-service.js";
 import { ManhuntGameService } from "./manhunt/manhunt-game-service.js";
+import { GuestProfileService } from "./guest-profiles/guest-profile-service.js";
 import { RoomService } from "./rooms/room-service.js";
 import { attachRoomSocketHandlers } from "./sockets/room-handlers.js";
 import type {
@@ -44,8 +45,9 @@ export interface BackendServer {
 export function createBackendServer(
   config: BackendConfig,
   roomService = new RoomService(),
+  guestProfileService = new GuestProfileService(config.guestProfiles),
 ): BackendServer {
-  const app = createApp(config, roomService);
+  const app = createApp(config, roomService, guestProfileService);
   const httpServer = createServer(app);
   const io = new Server<
     ClientToServerEvents,
