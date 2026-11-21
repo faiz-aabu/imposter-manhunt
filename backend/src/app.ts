@@ -6,6 +6,7 @@ import type {
 } from "express";
 import {
   createGuestProfileSchema,
+  linkGuestProfileSchema,
   restoreGuestProfileSchema,
   roomCodeSchema,
 } from "@impostor/api";
@@ -14,6 +15,7 @@ import type {
   CreateGuestProfileResponse,
   GetHealthResponse,
   GetRoomResponse,
+  LinkGuestProfileResponse,
   RestErrorResponse,
   RestoreGuestProfileResponse,
 } from "@impostor/api";
@@ -29,6 +31,7 @@ import { isSecureTransport } from "./utils/transport.js";
 const GUEST_PROFILE_RATE_LIMIT_WINDOW_MS = 60_000;
 const GUEST_PROFILE_CREATE_LIMIT = 5;
 const GUEST_PROFILE_RESTORE_LIMIT = 12;
+const GUEST_PROFILE_LINK_LIMIT = 10;
 
 export function createApp(
   config: BackendConfig,
@@ -117,6 +120,48 @@ export function createApp(
     },
   );
 
+  app.post(
+    "/guest-profiles/link",
+    async (
+      request,
+      response: Response<LinkGuestProfileResponse | RestErrorResponse>,
+      next,
+    ) => {
+      try {
+        requireGuestProfileFeature(guestProfiles);
+        consumeGuestProfileRateLimit(
+          request,
+          config,
+          guestProfileRateLimiter,
+          "link",
+          GUEST_PROFILE_LINK_LIMIT,
+        );
+        const parsed = linkGuestProfileSchema.safeParse(request.body);
+        if (!parsed.success) {
+          throw new AppError(
+            "INVALID_PAYLOAD",
+            "Guest profile linking request is invalid.",
+          );
+        }
+
+        const authorization = request.get("authorization");
+        const bearer = authorization?.match(/^Bearer ([^\s]+)$/i);
+        if (!bearer?.[1]) {
+          throw new AppError(
+            "INVALID_CREDENTIAL",
+            "A valid signed-in session is required.",
+          );
+        }
+
+        response.json(
+          await guestProfiles.linkToAccount(parsed.data.credential, bearer[1]),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
   app.get(
     "/rooms/:code",
     (request, response: Response<GetRoomResponse | RestErrorResponse>, next) => {
@@ -178,7 +223,7 @@ function consumeGuestProfileRateLimit(
   request: express.Request,
   config: BackendConfig,
   limiter: InMemoryRateLimiter,
-  action: "create" | "restore",
+  action: "create" | "restore" | "link",
   limit: number,
 ): void {
   const clientIp = getClientIp(
