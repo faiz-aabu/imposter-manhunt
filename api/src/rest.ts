@@ -30,6 +30,14 @@ export interface RestoreGuestProfileResponse {
   profile: GuestProfile;
 }
 
+export interface LinkGuestProfileRequest {
+  credential: string;
+}
+
+export interface LinkGuestProfileResponse {
+  profile: GuestProfile;
+}
+
 export type GetRoomResponse = Room;
 
 export interface RestErrorResponse {
