@@ -67,6 +67,12 @@ export const restoreGuestProfileSchema = z
   })
   .strict();
 
+export const linkGuestProfileSchema = z
+  .object({
+    credential: guestCredentialSchema,
+  })
+  .strict();
+
 export const roomCodeSchema = z
   .string()
   .trim()
