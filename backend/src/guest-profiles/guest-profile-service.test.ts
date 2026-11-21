@@ -360,3 +360,101 @@ test("guest profile endpoints are unavailable but harmless when unconfigured", a
     },
   });
 });
+
+
+test("guest profile linking verifies the Supabase access token before claiming the profile", async () => {
+  const credential = Buffer.alloc(32, 9).toString("base64url");
+  const accessToken = "verified-access-token";
+  const userId = "de53dca0-9c2a-4f6b-8c24-99a1e0b0c7d1";
+  const requests: Array<{ url: URL; init?: RequestInit }> = [];
+  const service = new GuestProfileService(
+    TEST_CONFIG.guestProfiles,
+    async (input, init) => {
+      const url = getRequestUrl(input);
+      requests.push({ url, init });
+      if (url.pathname === "/auth/v1/user") {
+        return createJsonResponse({ id: userId });
+      }
+      return createJsonResponse([TEST_PROFILE]);
+    },
+  );
+
+  const result = await service.linkToAccount(credential, accessToken);
+
+  assert.deepEqual(result, {
+    profile: {
+      id: TEST_PROFILE.id,
+      nickname: TEST_PROFILE.nickname,
+      createdAt: TEST_PROFILE.created_at,
+      updatedAt: TEST_PROFILE.updated_at,
+    },
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.url.pathname, "/auth/v1/user");
+  assert.equal(
+    new Headers(requests[0]?.init?.headers).get("authorization"),
+    `Bearer ${accessToken}`,
+  );
+  assert.equal(requests[1]?.url.pathname, "/rest/v1/rpc/link_guest_profile_to_auth_user");
+  assert.equal(
+    new Headers(requests[1]?.init?.headers).get("authorization"),
+    `Bearer ${TEST_SERVICE_ROLE_KEY}`,
+  );
+  const requestBody = JSON.parse(String(requests[1]?.init?.body)) as {
+    p_token_hash: string;
+    p_supabase_user_id: string;
+  };
+  assert.equal(
+    requestBody.p_token_hash,
+    `\\x${createHash("sha256").update(credential).digest("hex")}`,
+  );
+  assert.equal(requestBody.p_supabase_user_id, userId);
+  assert.equal(JSON.stringify(requestBody).includes(credential), false);
+  assert.equal(JSON.stringify(requestBody).includes(accessToken), false);
+});
+
+test("guest profile linking stops before the claim RPC when the Supabase session is invalid", async () => {
+  let claimRequestCount = 0;
+  const service = new GuestProfileService(
+    TEST_CONFIG.guestProfiles,
+    async (input) => {
+      const url = getRequestUrl(input);
+      if (url.pathname === "/auth/v1/user") {
+        return createJsonResponse({ message: "invalid token" }, 401);
+      }
+      claimRequestCount += 1;
+      return createJsonResponse([TEST_PROFILE]);
+    },
+  );
+
+  await assert.rejects(
+    service.linkToAccount("credential", "invalid-access-token"),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "INVALID_CREDENTIAL",
+  );
+  assert.equal(claimRequestCount, 0);
+});
+
+test("guest profile linking route requires a bearer session", async (t) => {
+  let supabaseRequestCount = 0;
+  const service = new GuestProfileService(
+    TEST_CONFIG.guestProfiles,
+    async () => {
+      supabaseRequestCount += 1;
+      return createJsonResponse([TEST_PROFILE]);
+    },
+  );
+  const { url } = await startTestServer(t, TEST_CONFIG, service);
+  const response = await fetch(`${url}/guest-profiles/link`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      credential: Buffer.alloc(32, 3).toString("base64url"),
+    }),
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(supabaseRequestCount, 0);
+});
