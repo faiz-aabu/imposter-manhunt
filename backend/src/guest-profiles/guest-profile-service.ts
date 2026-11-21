@@ -131,6 +131,150 @@ export class GuestProfileService {
     return { profile };
   }
 
+  async linkToAccount(
+    credential: string,
+    accessToken: string,
+  ): Promise<{ profile: GuestProfile }> {
+    const config = this.requireConfig();
+    const userEndpoint = new URL("/auth/v1/user", config.url);
+
+    let userResponse: Response;
+    try {
+      userResponse = await this.fetcher(userEndpoint, {
+        method: "GET",
+        headers: this.createHeaders(config, {
+          Authorization: `Bearer ${accessToken}`,
+        }),
+        signal: AbortSignal.timeout(SUPABASE_REQUEST_TIMEOUT_MS),
+        redirect: "error",
+      });
+    } catch {
+      throw new AppError(
+        "UNKNOWN",
+        "Account verification is temporarily unavailable.",
+        503,
+      );
+    }
+
+    if (!userResponse.ok) {
+      throw new AppError(
+        "INVALID_CREDENTIAL",
+        "Your sign-in session is invalid or expired.",
+      );
+    }
+
+    let user: unknown;
+    try {
+      user = await userResponse.json();
+    } catch {
+      throw new AppError(
+        "UNKNOWN",
+        "Account verification is temporarily unavailable.",
+        503,
+      );
+    }
+
+    if (
+      typeof user !== "object" ||
+      user === null ||
+      !("id" in user) ||
+      typeof user.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        user.id,
+      )
+    ) {
+      throw new AppError(
+        "INVALID_CREDENTIAL",
+        "Your sign-in session is invalid or expired.",
+      );
+    }
+
+    const tokenHash = createHash("sha256")
+      .update(credential, "utf8")
+      .digest("hex");
+    const linkEndpoint = new URL(
+      "/rest/v1/rpc/link_guest_profile_to_auth_user",
+      config.url,
+    );
+
+    let linkResponse: Response;
+    try {
+      linkResponse = await this.fetcher(linkEndpoint, {
+        method: "POST",
+        headers: this.createHeaders(config),
+        body: JSON.stringify({
+          p_token_hash: `\\x${tokenHash}`,
+          p_supabase_user_id: user.id,
+        }),
+        signal: AbortSignal.timeout(SUPABASE_REQUEST_TIMEOUT_MS),
+        redirect: "error",
+      });
+    } catch {
+      throw new AppError(
+        "UNKNOWN",
+        "Account linking is temporarily unavailable.",
+        503,
+      );
+    }
+
+    if (!linkResponse.ok) {
+      let databaseCode: unknown;
+      try {
+        const errorBody: unknown = await linkResponse.json();
+        if (
+          typeof errorBody === "object" &&
+          errorBody !== null &&
+          "code" in errorBody
+        ) {
+          databaseCode = errorBody.code;
+        }
+      } catch {
+        // Keep database details out of the public response.
+      }
+
+      if (databaseCode === "28000") {
+        throw new AppError(
+          "INVALID_CREDENTIAL",
+          "Guest credential is invalid, expired, or cannot be linked.",
+        );
+      }
+      throw new AppError(
+        "UNKNOWN",
+        "Account linking is temporarily unavailable.",
+        503,
+      );
+    }
+
+    let rows: unknown;
+    try {
+      rows = await linkResponse.json();
+    } catch {
+      throw new AppError(
+        "UNKNOWN",
+        "Account linking could not be confirmed.",
+        503,
+      );
+    }
+
+    if (!Array.isArray(rows) || rows.length !== 1) {
+      throw new AppError(
+        "INVALID_CREDENTIAL",
+        "Guest credential is invalid, expired, or cannot be linked.",
+      );
+    }
+
+    const profile = toGuestProfile(rows[0]);
+    if (!profile) {
+      throw new AppError(
+        "UNKNOWN",
+        "Account linking could not be confirmed.",
+        503,
+      );
+    }
+
+    return { profile };
+  }
+
   private requireConfig(): SupabaseGuestProfileConfig {
     if (!this.config) {
       throw new AppError(
