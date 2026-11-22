@@ -107,6 +107,7 @@ export default function SetupRoute() {
     const settingsUpdated = (payload: { roomCode: string; settings: ManhuntSettings }) => {
       if (payload.roomCode !== room?.code) return;
       setHunterCount(payload.settings.hunterCount);
+      setGameDurationSeconds(payload.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS);
       setRadiusMeters(clampRadiusMeters(payload.settings.boundary.radiusMeters));
       setCenter(payload.settings.boundary.center);
       setError(null);
