@@ -11,6 +11,7 @@ import type {
   ManhuntProximityAlertPayload,
   ManhuntSettings,
   ManhuntCountdownCancelledPayload,
+  ManhuntGameState,
   PlayerCaughtPayload,
   RoomCode,
 } from "@impostor/api";
@@ -188,6 +189,16 @@ function socketIdForPlayer(
     throw new Error("Player is not part of this test harness.");
   }
   return index === 0 ? "host" : `socket-${index}`;
+}
+
+function getManhuntState(
+  harness: ReturnType<typeof createHarness>,
+  playerId: string,
+): ManhuntGameState {
+  const state = harness.service
+    .getResumeSnapshot(harness.roomCode, playerId)?.state.state;
+  assert.ok(state && "teams" in state && "settings" in state);
+  return state;
 }
 
 function eastOffsetMeters(meters: number): number {
@@ -418,10 +429,14 @@ test("host removal cancels countdown and stale timers cannot activate a newer ga
   );
   harness.runtime.advance(MANHUNT_COUNTDOWN_DURATION_SECONDS * 1_000);
   assert.equal(secondSession.state.phase, "active");
-  assert.equal(
-    harness.states.filter((entry) => entry.state.phase === "active").length,
-    1,
+  const activeUpdates = harness.states.filter(
+    (entry) => entry.state.phase === "active",
   );
+  assert.equal(activeUpdates.length, 1);
+  const activeState = activeUpdates[0]!.state;
+  assert.ok("gameEndsAt" in activeState && "nextShrinkAt" in activeState);
+  assert.ok(activeState.gameEndsAt);
+  assert.ok(activeState.nextShrinkAt);
 });
 
 test("game cleanup cancels a pending Manhunt countdown timer", () => {
@@ -482,29 +497,29 @@ test("Manhunt warns before two progressive safe-zone shrinks and respects the 65
   const activeSince = Date.parse(session.state.activeSince!);
 
   runtime.advance((10 * 60 - 21) * 1_000);
-  let state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  let state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(state.shrinkWarningEndsAt, undefined);
 
   runtime.advance(1_000);
-  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(Date.parse(state.shrinkWarningEndsAt!), activeSince + 10 * 60 * 1_000);
 
   runtime.advance(20_000);
-  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(state.zoneShrinkEndsAt !== undefined, true);
 
   runtime.advance(60_000);
-  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(state.settings.boundary.radiusMeters, 85);
   assert.equal(Date.parse(state.nextShrinkAt!), activeSince + 20 * 60 * 1_000);
 
   runtime.advance((9 * 60 - 20) * 1_000);
-  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(Date.parse(state.shrinkWarningEndsAt!), activeSince + 20 * 60 * 1_000);
 
   runtime.advance(20_000);
   runtime.advance(60_000);
-  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  state = getManhuntState(harness, harness.playerIds[0]!);
   assert.equal(state.settings.boundary.radiusMeters, 65);
   assert.ok(state.settings.boundary.radiusMeters >= 65);
 });
@@ -524,6 +539,102 @@ test("Manhunt timeout awards the win to remaining runners", () => {
   runtime.advance(30 * 60 * 1_000);
   assert.equal(harness.ended.length, 1);
   assert.deepEqual(harness.ended[0]?.result.winnerPlayerIds, runnerIds);
+  assert.equal(harness.runtime.pendingTimerCount, 0);
+});
+
+test("Manhunt timeout excludes already-caught Hiders from the winner list", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(3, runtime);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 1_800,
+  });
+  const session = startActiveGame(harness);
+  const hunter = session.state.teams.find((entry) => entry.team === "hunter")!;
+  const runners = session.state.teams.filter((entry) => entry.team === "runner");
+  const caughtRunner = runners[0]!;
+  const remainingRunner = runners[1]!;
+
+  for (const assignment of session.state.teams) {
+    harness.service.recordLocation(
+      harness.roomCode,
+      socketIdForPlayer(harness, assignment.playerId),
+      assignment.playerId === caughtRunner.playerId
+        ? { latitude: 0, longitude: eastOffsetMeters(1.4) }
+        : { latitude: 0, longitude: 0 },
+    );
+  }
+  const request = harness.service.attemptCatch(
+    harness.roomCode,
+    socketIdForPlayer(harness, hunter.playerId),
+    caughtRunner.playerId,
+  );
+  harness.service.respondToCatch(
+    harness.roomCode,
+    socketIdForPlayer(harness, caughtRunner.playerId),
+    request.requestId,
+    true,
+  );
+
+  runtime.advance(30 * 60 * 1_000);
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    harness.ended[0]?.result.winnerPlayerIds,
+    [remainingRunner.playerId],
+  );
+  assert.equal(
+    harness.ended[0]?.result.winnerPlayerIds.includes(caughtRunner.playerId),
+    false,
+  );
+  assert.equal(harness.runtime.pendingTimerCount, 0);
+});
+
+test("Manhunt game and zone timers are cancelled when hunters win during a shrink", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(3, runtime);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 1_800,
+  });
+  const session = startActiveGame(harness);
+  const hunter = session.state.teams.find((entry) => entry.team === "hunter")!;
+  const runners = session.state.teams.filter((entry) => entry.team === "runner");
+
+  runtime.advance((10 * 60 - 20) * 1_000);
+  runtime.advance(20_000);
+  assert.ok(getManhuntState(harness, harness.playerIds[0]!).zoneShrinkEndsAt);
+
+  harness.service.recordLocation(
+    harness.roomCode,
+    socketIdForPlayer(harness, hunter.playerId),
+    { latitude: 0, longitude: 0 },
+  );
+  for (const runner of runners) {
+    harness.service.recordLocation(
+      harness.roomCode,
+      socketIdForPlayer(harness, runner.playerId),
+      { latitude: 0, longitude: eastOffsetMeters(1.4) },
+    );
+  }
+  for (const runner of runners) {
+    const request = harness.service.attemptCatch(
+      harness.roomCode,
+      socketIdForPlayer(harness, hunter.playerId),
+      runner.playerId,
+    );
+    harness.service.respondToCatch(
+      harness.roomCode,
+      socketIdForPlayer(harness, runner.playerId),
+      request.requestId,
+      true,
+    );
+  }
+
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    harness.ended[0]?.result.winnerPlayerIds,
+    [hunter.playerId],
+  );
   assert.equal(harness.runtime.pendingTimerCount, 0);
 });
 
@@ -626,6 +737,10 @@ test("catch requests accept exactly 1.5 metres and only mark caught after civili
   assert.equal(harness.catchConfirmed.length, 2);
   assert.equal(harness.ended.length, 1);
   assert.equal(harness.ended[0]?.result.outcome, "win");
+  assert.deepEqual(
+    harness.ended[0]?.result.winnerPlayerIds,
+    [hunter.playerId],
+  );
   assert.equal(harness.runtime.pendingTimerCount, 0);
 });
 

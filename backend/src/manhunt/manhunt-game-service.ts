@@ -677,13 +677,6 @@ export class ManhuntGameService {
     delete game.session.state.countdownEndsAt;
 
     const activeRoom = this.rooms.activateGame(roomCode, sessionId);
-    this.events.roomUpdated(activeRoom);
-    this.events.stateUpdated(roomCode, {
-      sessionId,
-      roomCode,
-      state: game.session.state,
-      updatedAt: activeSince,
-    });
     const durationSeconds = game.session.state.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
     const gameEndsAt = new Date(now.getTime() + durationSeconds * 1_000).toISOString();
     const firstShrinkSeconds = Math.floor(durationSeconds / 3);
@@ -696,6 +689,7 @@ export class ManhuntGameService {
     );
     this.scheduleZoneWarning(roomCode, firstShrinkSeconds * 1_000);
     this.scheduleNextReveal(roomCode);
+    this.events.roomUpdated(activeRoom);
     this.events.stateUpdated(roomCode, {
       sessionId,
       roomCode,
