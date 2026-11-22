@@ -88,7 +88,7 @@ export interface ManhuntBoundary {
 export interface ManhuntSettings {
   hunterCount: number;
   boundary: ManhuntBoundary;
-  gameDurationSeconds: 1_800 | 2_700 | 3_600;
+  gameDurationSeconds?: 1_800 | 2_700 | 3_600;
 }
 
 export interface ManhuntTeamAssignment {
