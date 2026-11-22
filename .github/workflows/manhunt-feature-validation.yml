@@ -1,0 +1,39 @@
+name: Validate Manhunt feature
+
+on:
+  pull_request:
+    branches:
+      - staging/backend-auth
+  push:
+    branches:
+      - feature/manhunt-shrinking-zone-timer
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manhunt-feature-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check all workspaces
+        run: npm run typecheck
+
+      - name: Run backend tests
+        run: npm run test --workspace=backend
