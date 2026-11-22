@@ -740,9 +740,11 @@ export class ManhuntGameService {
     delete state.shrinkWarningEndsAt;
     const durationSeconds = state.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
     const nextStageSeconds = Math.floor((durationSeconds * (stage + 2)) / 3);
-    state.nextShrinkAt = stage === 0
-      ? new Date(Date.parse(state.activeSince!) + nextStageSeconds * 1_000).toISOString()
-      : undefined;
+    if (stage === 0) {
+      state.nextShrinkAt = new Date(Date.parse(state.activeSince!) + nextStageSeconds * 1_000).toISOString();
+    } else {
+      delete state.nextShrinkAt;
+    }
     const updateRadius = () => {
       const current = this.currentGames.get(roomCode);
       if (!current || current !== game || current.session.id !== sessionId || current.session.status !== "in_progress") return;
