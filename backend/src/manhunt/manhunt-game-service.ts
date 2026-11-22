@@ -697,6 +697,12 @@ export class ManhuntGameService {
     );
     this.scheduleZoneWarning(roomCode, firstShrinkSeconds * 1_000);
     this.scheduleNextReveal(roomCode);
+    this.events.stateUpdated(roomCode, {
+      sessionId,
+      roomCode,
+      state: game.session.state,
+      updatedAt: this.runtime.now().toISOString(),
+    });
   }
 
   private scheduleZoneWarning(roomCode: RoomCode, delayMs: number): void {
