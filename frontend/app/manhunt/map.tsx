@@ -219,7 +219,7 @@ export default function MapRoute() {
   useEffect(() => {
     if (!active && !manhunt.reveal) return;
     setClockNow(Date.now());
-    const timer = setInterval(() => setClockNow(Date.now()), 250);
+    const timer = setInterval(() => setClockNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [active, manhunt.reveal?.visibleUntil]);
 
