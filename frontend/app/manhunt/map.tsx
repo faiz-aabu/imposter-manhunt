@@ -57,6 +57,9 @@ export default function MapRoute() {
   );
   const [catchAnnouncement, setCatchAnnouncement] =
     useState<CatchConfirmedPayload | null>(null);
+  const serverTimeOffsetMs = useManhuntGameStore(
+    (state) => state.serverTimeOffsetMs,
+  );
   const catchResponseBusyRef = useRef(false);
   const lastLocationSentAt = useRef(0);
 
@@ -217,19 +220,17 @@ export default function MapRoute() {
   }, [incomingCatchRequest?.requestId]);
 
   useEffect(() => {
-    if (!manhunt.reveal) {
-      return;
-    }
-
+    if (!active && !manhunt.reveal) return;
     setClockNow(Date.now());
     const timer = setInterval(() => setClockNow(Date.now()), 1_000);
     return () => clearInterval(timer);
-  }, [manhunt.reveal?.visibleUntil]);
+  }, [active, manhunt.reveal?.visibleUntil]);
 
   const revealVisibleUntil = manhunt.reveal
     ? Date.parse(manhunt.reveal.visibleUntil)
     : 0;
   const now = Math.max(clockNow, Date.now());
+  const serverNow = now + serverTimeOffsetMs;
   const visibleRevealRemaining = Number.isFinite(revealVisibleUntil)
     ? Math.max(0, Math.ceil((revealVisibleUntil - now) / 1_000))
     : 0;
@@ -238,6 +239,22 @@ export default function MapRoute() {
     ? manhunt.reveal?.locations ?? []
     : [];
   const formattedRevealTime = `00:${String(visibleRevealRemaining).padStart(2, "0")}`;
+  const gameEndsAt = manhunt.gameState?.gameEndsAt
+    ? Date.parse(manhunt.gameState.gameEndsAt)
+    : Number.NaN;
+  const gameRemainingSeconds = Number.isFinite(gameEndsAt)
+    ? Math.max(0, Math.ceil((gameEndsAt - serverNow) / 1_000))
+    : null;
+  const formattedGameTime = gameRemainingSeconds === null
+    ? "--:--"
+    : `${String(Math.floor(gameRemainingSeconds / 60)).padStart(2, "0")}:${String(gameRemainingSeconds % 60).padStart(2, "0")}`;
+  const shrinkWarningEndsAt = manhunt.gameState?.shrinkWarningEndsAt
+    ? Date.parse(manhunt.gameState.shrinkWarningEndsAt)
+    : Number.NaN;
+  const shrinkCountdownRemaining = Number.isFinite(shrinkWarningEndsAt) &&
+    shrinkWarningEndsAt > serverNow
+    ? Math.max(0, Math.ceil((shrinkWarningEndsAt - serverNow) / 1_000))
+    : 0;
 
   const attemptCatch = () => {
     if (
@@ -352,13 +369,16 @@ export default function MapRoute() {
             style={styles.topHud}
             leftLabel="Manhunt"
             leftValue={manhunt.ownTeam ? manhunt.ownTeam.toUpperCase() : "TEAM"}
-            rightLabel="Reveal"
-            rightValue={
-              revealActive
-                ? `${visibleRevealRemaining}s`
-                : "Waiting"
-            }
+            rightLabel="Game"
+            rightValue={formattedGameTime}
           />
+          {shrinkCountdownRemaining > 0 ? (
+            <MapBanner
+              message="Safe zone shrinking in"
+              timer={`${shrinkCountdownRemaining}s`}
+              style={styles.revealBanner}
+            />
+          ) : null}
           {revealActive ? (
             <MapBanner
               message="Location reveal active"

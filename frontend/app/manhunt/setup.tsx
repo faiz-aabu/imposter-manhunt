@@ -14,6 +14,8 @@ import {
   MANHUNT_LOCATION_FLASH_INTERVAL_SECONDS,
   MAX_MANHUNT_BOUNDARY_RADIUS_METERS,
   MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
+  MANHUNT_GAME_DURATION_OPTIONS_SECONDS,
+  DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
   MIN_MANHUNT_HUNTERS,
   manhuntSettingsSchema,
   MANHUNT_EVENTS,
@@ -64,6 +66,9 @@ export default function SetupRoute() {
   const [hunterCount, setHunterCount] = useState(
     room?.settings.manhunt?.hunterCount ?? MIN_MANHUNT_HUNTERS,
   );
+  const [gameDurationSeconds, setGameDurationSeconds] = useState<1_800 | 2_700 | 3_600>(
+    room?.settings.manhunt?.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
+  );
   const [radiusMeters, setRadiusMeters] = useState(
     clampRadiusMeters(
       room?.settings.manhunt?.boundary.radiusMeters ??
@@ -82,6 +87,7 @@ export default function SetupRoute() {
   useEffect(() => {
     if (!room) return;
     setHunterCount(room.settings.manhunt?.hunterCount ?? MIN_MANHUNT_HUNTERS);
+    setGameDurationSeconds(room.settings.manhunt?.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS);
     setRadiusMeters(
       clampRadiusMeters(
         room.settings.manhunt?.boundary.radiusMeters ??
@@ -101,6 +107,7 @@ export default function SetupRoute() {
     const settingsUpdated = (payload: { roomCode: string; settings: ManhuntSettings }) => {
       if (payload.roomCode !== room?.code) return;
       setHunterCount(payload.settings.hunterCount);
+      setGameDurationSeconds(payload.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS);
       setRadiusMeters(clampRadiusMeters(payload.settings.boundary.radiusMeters));
       setCenter(payload.settings.boundary.center);
       setError(null);
@@ -143,6 +150,7 @@ export default function SetupRoute() {
       center
         ? {
             hunterCount,
+            gameDurationSeconds,
             boundary: {
               center: {
                 latitude: center.latitude,
@@ -152,7 +160,7 @@ export default function SetupRoute() {
             },
           }
         : null,
-    [center, hunterCount, radiusMeters],
+    [center, gameDurationSeconds, hunterCount, radiusMeters],
   );
   const settingsValid =
     settings !== null && manhuntSettingsSchema.safeParse(settings).success;
@@ -383,6 +391,24 @@ export default function SetupRoute() {
         </HudPanel>
 
         <HudPanel style={styles.panel}>
+          <Text style={styles.sectionTitle}>Game duration</Text>
+          <View style={styles.stepperControls}>
+            {MANHUNT_GAME_DURATION_OPTIONS_SECONDS.map((duration) => (
+              <PrimaryButton
+                key={duration}
+                title={`${duration / 60} minutes`}
+                variant={gameDurationSeconds === duration ? "green" : "secondary"}
+                disabled={!isHost}
+                onPress={() => setGameDurationSeconds(duration)}
+              />
+            ))}
+          </View>
+          <Text style={styles.mutedText}>
+            The safe zone has two gradual shrink phases, with a 20-second warning before each one.
+          </Text>
+        </HudPanel>
+
+        <HudPanel style={styles.panel}>
           <Text style={styles.sectionTitle}>Play area</Text>
           <PrimaryButton
             title={center ? "Update from my GPS" : "Use my GPS"}
@@ -515,6 +541,7 @@ const styles = StyleSheet.create({
   },
   stepperControls: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: spacing.sm,
   },
   locationStatus: {
