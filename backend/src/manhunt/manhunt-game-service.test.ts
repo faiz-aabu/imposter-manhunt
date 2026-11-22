@@ -469,6 +469,63 @@ test("reveal cycle opens at 20 seconds for five seconds and repeats", () => {
   assert.equal(runtime.pendingTimerCount, 0);
 });
 
+
+test("Manhunt warns before two progressive safe-zone shrinks and respects the 65m floor", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(3, runtime);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 1_800,
+  });
+  const session = startActiveGame(harness);
+  const activeSince = Date.parse(session.state.activeSince!);
+
+  runtime.advance((10 * 60 - 21) * 1_000);
+  let state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(state.shrinkWarningEndsAt, undefined);
+
+  runtime.advance(1_000);
+  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(Date.parse(state.shrinkWarningEndsAt!), activeSince + 10 * 60 * 1_000);
+
+  runtime.advance(20_000);
+  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(state.zoneShrinkEndsAt !== undefined, true);
+
+  runtime.advance(60_000);
+  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(state.settings.boundary.radiusMeters, 425);
+  assert.equal(Date.parse(state.nextShrinkAt!), activeSince + 20 * 60 * 1_000);
+
+  runtime.advance((9 * 60 - 20) * 1_000);
+  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(Date.parse(state.shrinkWarningEndsAt!), activeSince + 20 * 60 * 1_000);
+
+  runtime.advance(20_000);
+  runtime.advance(60_000);
+  state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
+  assert.equal(state.settings.boundary.radiusMeters, 319);
+  assert.ok(state.settings.boundary.radiusMeters >= 65);
+});
+
+test("Manhunt timeout awards the win to remaining runners", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(3, runtime);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 1_800,
+  });
+  const session = startActiveGame(harness);
+  const runnerIds = session.state.teams
+    .filter((assignment) => assignment.team === "runner")
+    .map((assignment) => assignment.playerId);
+
+  runtime.advance(30 * 60 * 1_000);
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(harness.ended[0]?.result.winnerPlayerIds, runnerIds);
+  assert.equal(harness.runtime.pendingTimerCount, 0);
+});
+
 test("catch requests accept exactly 1.5 metres and only mark caught after civilian acceptance", () => {
   const harness = createHarness(3);
   harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
