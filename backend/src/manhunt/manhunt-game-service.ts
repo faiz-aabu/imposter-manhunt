@@ -906,7 +906,11 @@ export class ManhuntGameService {
       game.session.id,
     );
     const winnerIds = [...game.teams.entries()]
-      .filter(([, team]) => team === winningTeam)
+      .filter(
+        ([playerId, team]) =>
+          team === winningTeam &&
+          (winningTeam !== "runner" || !game.caughtPlayerIds.has(playerId)),
+      )
       .map(([playerId]) => playerId);
     this.events.roomUpdated(publicRoom ?? this.rooms.getPublicRoom(game.roomCode)!);
     const ended: GameEndedPayload = {
