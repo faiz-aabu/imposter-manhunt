@@ -108,6 +108,9 @@ export interface ManhuntGameState {
   nextShrinkAt?: ISODateString;
   shrinkWarningEndsAt?: ISODateString;
   shrinkStage?: number;
+  zoneShrinkEndsAt?: ISODateString;
+  zoneShrinkFromRadiusMeters?: number;
+  zoneShrinkToRadiusMeters?: number;
 }
 
 export type PublicGameState = ImpostorGameState | ManhuntGameState;
