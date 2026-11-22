@@ -475,6 +475,7 @@ test("Manhunt warns before two progressive safe-zone shrinks and respects the 65
   const harness = createHarness(3, runtime);
   harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
     ...validSettings,
+    boundary: { ...validSettings.boundary, radiusMeters: 100 },
     gameDurationSeconds: 1_800,
   });
   const session = startActiveGame(harness);
@@ -494,7 +495,7 @@ test("Manhunt warns before two progressive safe-zone shrinks and respects the 65
 
   runtime.advance(60_000);
   state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
-  assert.equal(state.settings.boundary.radiusMeters, 425);
+  assert.equal(state.settings.boundary.radiusMeters, 85);
   assert.equal(Date.parse(state.nextShrinkAt!), activeSince + 20 * 60 * 1_000);
 
   runtime.advance((9 * 60 - 20) * 1_000);
@@ -504,7 +505,7 @@ test("Manhunt warns before two progressive safe-zone shrinks and respects the 65
   runtime.advance(20_000);
   runtime.advance(60_000);
   state = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!)!.state.state;
-  assert.equal(state.settings.boundary.radiusMeters, 319);
+  assert.equal(state.settings.boundary.radiusMeters, 65);
   assert.ok(state.settings.boundary.radiusMeters >= 65);
 });
 
