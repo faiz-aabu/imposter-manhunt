@@ -88,6 +88,7 @@ export interface ManhuntBoundary {
 export interface ManhuntSettings {
   hunterCount: number;
   boundary: ManhuntBoundary;
+  gameDurationSeconds: 1_800 | 2_700 | 3_600;
 }
 
 export interface ManhuntTeamAssignment {
@@ -103,6 +104,10 @@ export interface ManhuntGameState {
   countdownEndsAt?: ISODateString;
   activeSince?: ISODateString;
   nextLocationFlashAt?: ISODateString;
+  gameEndsAt?: ISODateString;
+  nextShrinkAt?: ISODateString;
+  shrinkWarningEndsAt?: ISODateString;
+  shrinkStage?: number;
 }
 
 export type PublicGameState = ImpostorGameState | ManhuntGameState;
