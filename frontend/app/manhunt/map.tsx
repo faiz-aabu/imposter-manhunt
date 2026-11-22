@@ -217,14 +217,11 @@ export default function MapRoute() {
   }, [incomingCatchRequest?.requestId]);
 
   useEffect(() => {
-    if (!manhunt.reveal) {
-      return;
-    }
-
+    if (!active && !manhunt.reveal) return;
     setClockNow(Date.now());
-    const timer = setInterval(() => setClockNow(Date.now()), 1_000);
+    const timer = setInterval(() => setClockNow(Date.now()), 250);
     return () => clearInterval(timer);
-  }, [manhunt.reveal?.visibleUntil]);
+  }, [active, manhunt.reveal?.visibleUntil]);
 
   const revealVisibleUntil = manhunt.reveal
     ? Date.parse(manhunt.reveal.visibleUntil)
@@ -238,6 +235,13 @@ export default function MapRoute() {
     ? manhunt.reveal?.locations ?? []
     : [];
   const formattedRevealTime = `00:${String(visibleRevealRemaining).padStart(2, "0")}`;
+  const gameEndsAt = manhunt.gameState?.gameEndsAt ? Date.parse(manhunt.gameState.gameEndsAt) : 0;
+  const gameRemainingSeconds = gameEndsAt > 0 ? Math.max(0, Math.ceil((gameEndsAt - now) / 1_000)) : 0;
+  const formattedGameTime = `${String(Math.floor(gameRemainingSeconds / 60)).padStart(2, "0")}:${String(gameRemainingSeconds % 60).padStart(2, "0")}`;
+  const shrinkWarningEndsAt = manhunt.gameState?.shrinkWarningEndsAt ? Date.parse(manhunt.gameState.shrinkWarningEndsAt) : 0;
+  const shrinkCountdownRemaining = shrinkWarningEndsAt > now
+    ? Math.max(0, Math.ceil((shrinkWarningEndsAt - now) / 1_000))
+    : 0;
 
   const attemptCatch = () => {
     if (
@@ -352,13 +356,16 @@ export default function MapRoute() {
             style={styles.topHud}
             leftLabel="Manhunt"
             leftValue={manhunt.ownTeam ? manhunt.ownTeam.toUpperCase() : "TEAM"}
-            rightLabel="Reveal"
-            rightValue={
-              revealActive
-                ? `${visibleRevealRemaining}s`
-                : "Waiting"
-            }
+            rightLabel="Game"
+            rightValue={formattedGameTime}
           />
+          {shrinkCountdownRemaining > 0 ? (
+            <MapBanner
+              message="Safe zone shrinking in"
+              timer={`${shrinkCountdownRemaining}s`}
+              style={styles.revealBanner}
+            />
+          ) : null}
           {revealActive ? (
             <MapBanner
               message="Location reveal active"
