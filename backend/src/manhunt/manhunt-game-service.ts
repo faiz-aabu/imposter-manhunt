@@ -687,7 +687,6 @@ export class ManhuntGameService {
     const durationSeconds = game.session.state.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
     const gameEndsAt = new Date(now.getTime() + durationSeconds * 1_000).toISOString();
     const firstShrinkSeconds = Math.floor(durationSeconds / 3);
-    const secondShrinkSeconds = Math.floor((durationSeconds * 2) / 3);
     game.session.state.gameEndsAt = gameEndsAt;
     game.session.state.nextShrinkAt = new Date(now.getTime() + firstShrinkSeconds * 1_000).toISOString();
     game.session.state.shrinkStage = 0;
