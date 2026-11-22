@@ -10,6 +10,7 @@ import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { useClassicGameEvents } from "../src/hooks/use-classic-game-events";
 import { colors, spacing, typography } from "../src/theme";
 import { useSocketConnection } from "../src/hooks/use-socket-connection";
+import { useAuthStore } from "../src/store/auth-store";
 
 const FONT_LOAD_TIMEOUT_MS = 10_000;
 
@@ -23,6 +24,13 @@ export default function RootLayout() {
 
   useClassicGameEvents();
   useSocketConnection(true);
+  const initializeAuth = useAuthStore((state) => state.initialize);
+  const disposeAuth = useAuthStore((state) => state.dispose);
+
+  useEffect(() => {
+    void initializeAuth();
+    return () => disposeAuth();
+  }, [disposeAuth, initializeAuth]);
 
   useEffect(() => {
     if (fontsLoaded || fontError) {
@@ -42,6 +50,8 @@ export default function RootLayout() {
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="join" options={{ headerShown: false }} />
         <Stack.Screen name="lobby" options={{ headerShown: false }} />
+        <Stack.Screen name="sign-in" options={{ headerShown: false }} />
+        <Stack.Screen name="account" options={{ headerShown: false }} />
         <Stack.Screen name="games" options={{ headerShown: false }} />
         <Stack.Screen
           name="imposter/settings"

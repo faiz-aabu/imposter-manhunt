@@ -23,6 +23,8 @@ import { persistRoomEntry } from "../src/services/room-entry";
 import { emitWithAcknowledgement } from "../src/services/socket-requests";
 import { colors, radii, spacing, typography } from "../src/theme";
 import { nicknameSchema, ROOM_EVENTS } from "@impostor/api";
+import { getAuthEntryRoute } from "../src/services/supabase-auth-config";
+import { useAuthStore } from "../src/store/auth-store";
 
 export default function HomeRoute() {
   const router = useRouter();
@@ -35,6 +37,8 @@ export default function HomeRoute() {
     (state) => state.latestConnectionError,
   );
   const setRoomSession = useRoomStore((state) => state.setSession);
+  const authStatus = useAuthStore((state) => state.status);
+  const accountEmail = useAuthStore((state) => state.email);
 
   useEffect(() => {
     let active = true;
@@ -195,6 +199,20 @@ export default function HomeRoute() {
         variant="secondary"
         onPress={() => router.push("/join")}
       />
+
+      <PrimaryButton
+        title={authStatus === "signed-in" ? "Account" : "Continue with email"}
+        variant="secondary"
+        accessibilityLabel={
+          authStatus === "signed-in"
+            ? `Account for ${accountEmail ?? "signed-in player"}`
+            : "Continue with email"
+        }
+        onPress={() => router.push(getAuthEntryRoute(authStatus))}
+      />
+      {authStatus === "signed-in" && accountEmail ? (
+        <Text style={styles.accountEmail}>{accountEmail}</Text>
+      ) : null}
     </Screen>
   );
 }
@@ -326,6 +344,11 @@ const styles = StyleSheet.create({
   tagline: {
     ...typography.body,
     color: colors.textMuted,
+  },
+  accountEmail: {
+    ...typography.small,
+    color: colors.textMuted,
+    textAlign: "center",
   },
   nicknameField: {
     marginTop: spacing.xs,
