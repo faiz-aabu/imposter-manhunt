@@ -201,6 +201,17 @@ function getManhuntState(
   return state;
 }
 
+function removePlayer(
+  harness: ReturnType<typeof createHarness>,
+  playerId: string,
+): void {
+  const removal = harness.rooms.leaveRoom(
+    harness.roomCode,
+    socketIdForPlayer(harness, playerId),
+  );
+  harness.service.onPlayerRemoved(harness.roomCode, removal.room !== undefined);
+}
+
 function eastOffsetMeters(meters: number): number {
   return (meters / 6_371_000) * (180 / Math.PI);
 }
@@ -453,6 +464,29 @@ test("game cleanup cancels a pending Manhunt countdown timer", () => {
   );
 });
 
+test("a stale game timeout cannot emit a result for a newer Manhunt session", () => {
+  const harness = createHarness();
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
+  const firstSession = startActiveGame(harness);
+
+  harness.rooms.finishGame(harness.roomCode, firstSession.id);
+  harness.service.clearSession(harness.roomCode);
+  const secondSession = harness.service.startGame(
+    harness.roomCode,
+    harness.hostSocket,
+  );
+  harness.runtime.runCancelledCallbacks();
+
+  assert.equal(harness.ended.length, 0);
+  assert.equal(
+    harness.rooms.getPublicRoom(harness.roomCode)?.currentGameId,
+    secondSession.id,
+  );
+  harness.runtime.advance(MANHUNT_COUNTDOWN_DURATION_SECONDS * 1_000);
+  assert.equal(secondSession.state.phase, "active");
+  assert.equal(harness.ended.length, 0);
+});
+
 test("reveal cycle opens at 20 seconds for five seconds and repeats", () => {
   const runtime = new ManualRuntime();
   const harness = createHarness(4, runtime);
@@ -524,6 +558,87 @@ test("Manhunt warns before two progressive safe-zone shrinks and respects the 65
   assert.ok(state.settings.boundary.radiusMeters >= 65);
 });
 
+test("Manhunt schedules both shrink phases for every duration and the default", () => {
+  const scenarios = [
+    { name: "30-minute", configuredDuration: 1_800, duration: 1_800 },
+    { name: "45-minute", configuredDuration: 2_700, duration: 2_700 },
+    { name: "60-minute", configuredDuration: 3_600, duration: 3_600 },
+    { name: "default", configuredDuration: undefined, duration: 3_600 },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const runtime = new ManualRuntime();
+    const harness = createHarness(3, runtime);
+    const settings = scenario.configuredDuration === undefined
+      ? validSettings
+      : { ...validSettings, gameDurationSeconds: scenario.configuredDuration };
+    harness.service.updateSettings(harness.roomCode, harness.hostSocket, settings);
+    const session = startActiveGame(harness);
+    const activeSince = Date.parse(session.state.activeSince!);
+    const firstShrinkSeconds = Math.floor(scenario.duration / 3);
+    const secondShrinkSeconds = Math.floor((scenario.duration * 2) / 3);
+    const firstShrinkAt = activeSince + firstShrinkSeconds * 1_000;
+    const secondShrinkAt = activeSince + secondShrinkSeconds * 1_000;
+
+    assert.equal(
+      session.state.settings.gameDurationSeconds,
+      scenario.duration,
+      `${scenario.name} duration`,
+    );
+    assert.equal(
+      Date.parse(session.state.gameEndsAt!),
+      activeSince + scenario.duration * 1_000,
+      `${scenario.name} game deadline`,
+    );
+    assert.equal(
+      Date.parse(session.state.nextShrinkAt!),
+      firstShrinkAt,
+      `${scenario.name} first shrink deadline`,
+    );
+
+    runtime.advance((firstShrinkSeconds - 20) * 1_000);
+    let state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(
+      Date.parse(state.shrinkWarningEndsAt!),
+      firstShrinkAt,
+      `${scenario.name} first warning deadline`,
+    );
+    runtime.advance(20_000);
+    state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(Date.parse(state.zoneShrinkEndsAt!), firstShrinkAt + 60_000);
+    assert.equal(state.zoneShrinkFromRadiusMeters, 500);
+    assert.equal(state.zoneShrinkToRadiusMeters, 425);
+    runtime.advance(60_000);
+
+    state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(state.settings.boundary.radiusMeters, 425);
+    assert.equal(Date.parse(state.nextShrinkAt!), secondShrinkAt);
+    runtime.advance(
+      secondShrinkSeconds * 1_000 -
+        20_000 -
+        (firstShrinkSeconds * 1_000 + 60_000),
+    );
+    state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(
+      Date.parse(state.shrinkWarningEndsAt!),
+      secondShrinkAt,
+      `${scenario.name} second warning deadline`,
+    );
+    runtime.advance(20_000);
+    state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(Date.parse(state.zoneShrinkEndsAt!), secondShrinkAt + 60_000);
+    assert.equal(state.zoneShrinkFromRadiusMeters, 425);
+    assert.equal(state.zoneShrinkToRadiusMeters, 319);
+    runtime.advance(60_000);
+
+    state = getManhuntState(harness, harness.playerIds[0]!);
+    assert.equal(state.settings.boundary.radiusMeters, 319);
+    assert.equal(state.shrinkStage, 2);
+    assert.equal(state.nextShrinkAt, undefined);
+    assert.equal(state.shrinkWarningEndsAt, undefined);
+  }
+});
+
 test("Manhunt timeout awards the win to remaining runners", () => {
   const runtime = new ManualRuntime();
   const harness = createHarness(3, runtime);
@@ -539,6 +654,80 @@ test("Manhunt timeout awards the win to remaining runners", () => {
   runtime.advance(30 * 60 * 1_000);
   assert.equal(harness.ended.length, 1);
   assert.deepEqual(harness.ended[0]?.result.winnerPlayerIds, runnerIds);
+  assert.equal(harness.runtime.pendingTimerCount, 0);
+});
+
+test("a removed Hider is not a timeout winner", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(4, runtime);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 1_800,
+  });
+  const session = startActiveGame(harness);
+  const runners = session.state.teams.filter(
+    (assignment) => assignment.team === "runner",
+  );
+  const removedRunner = runners[0]!;
+  const remainingRunnerIds = runners
+    .slice(1)
+    .map((assignment) => assignment.playerId);
+  removePlayer(harness, removedRunner.playerId);
+
+  runtime.advance(30 * 60 * 1_000);
+
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    harness.ended[0]?.result.winnerPlayerIds,
+    remainingRunnerIds,
+  );
+  assert.equal(
+    harness.ended[0]?.result.winnerPlayerIds.includes(removedRunner.playerId),
+    false,
+  );
+});
+
+test("a removed Hider does not prevent Hunters winning after remaining Hiders are caught", () => {
+  const harness = createHarness(3);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
+  const session = startActiveGame(harness);
+  const hunter = session.state.teams.find(
+    (assignment) => assignment.team === "hunter",
+  )!;
+  const runners = session.state.teams.filter(
+    (assignment) => assignment.team === "runner",
+  );
+  const removedRunner = runners[0]!;
+  const remainingRunner = runners[1]!;
+
+  removePlayer(harness, removedRunner.playerId);
+  harness.service.recordLocation(
+    harness.roomCode,
+    socketIdForPlayer(harness, hunter.playerId),
+    { latitude: 0, longitude: 0 },
+  );
+  harness.service.recordLocation(
+    harness.roomCode,
+    socketIdForPlayer(harness, remainingRunner.playerId),
+    { latitude: 0, longitude: eastOffsetMeters(1.4) },
+  );
+  const request = harness.service.attemptCatch(
+    harness.roomCode,
+    socketIdForPlayer(harness, hunter.playerId),
+    remainingRunner.playerId,
+  );
+  harness.service.respondToCatch(
+    harness.roomCode,
+    socketIdForPlayer(harness, remainingRunner.playerId),
+    request.requestId,
+    true,
+  );
+
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    harness.ended[0]?.result.winnerPlayerIds,
+    [hunter.playerId],
+  );
   assert.equal(harness.runtime.pendingTimerCount, 0);
 });
 

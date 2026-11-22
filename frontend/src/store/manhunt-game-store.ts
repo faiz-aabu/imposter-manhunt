@@ -27,6 +27,7 @@ interface ManhuntGameStateStore {
   result: GameEndedPayload | null;
   countdown: CountdownPayload | null;
   countdownServerOffsetMs: number | null;
+  serverTimeOffsetMs: number;
   catchPending: boolean;
   catchRequestStatus: CatchRequestStatusPayload | null;
   error: string | null;
@@ -60,6 +61,7 @@ export const useManhuntGameStore = create<ManhuntGameStateStore>((set, get) => (
   result: null,
   countdown: null,
   countdownServerOffsetMs: null,
+  serverTimeOffsetMs: 0,
   catchPending: false,
   catchRequestStatus: null,
   error: null,
@@ -76,13 +78,15 @@ export const useManhuntGameStore = create<ManhuntGameStateStore>((set, get) => (
       result: null,
       countdown: null,
       countdownServerOffsetMs: null,
+      serverTimeOffsetMs:
+        Date.parse(session.startedAt) - Date.now(),
       reveal: null,
       catchPending: false,
       catchRequestStatus: null,
       error: null,
     });
   },
-  setGameState: (payload) => {
+  setGameState: (payload, receivedAt = Date.now()) => {
     const session = get().session;
     if (
       !session ||
@@ -96,6 +100,7 @@ export const useManhuntGameStore = create<ManhuntGameStateStore>((set, get) => (
       gameState: payload.state,
       session: { ...session, state: payload.state },
       assignments: payload.state.teams,
+      serverTimeOffsetMs: Date.parse(payload.updatedAt) - receivedAt,
       reveal: payload.state.phase === "active" ? get().reveal : null,
       ...(payload.state.phase !== "countdown"
         ? { countdown: null, countdownServerOffsetMs: null }
@@ -172,6 +177,7 @@ export const useManhuntGameStore = create<ManhuntGameStateStore>((set, get) => (
     set({
       countdown: payload,
       countdownServerOffsetMs: Date.parse(payload.serverNow) - receivedAt,
+      serverTimeOffsetMs: Date.parse(payload.serverNow) - receivedAt,
     });
   },
   setError: (error) => set({ error }),
@@ -187,6 +193,7 @@ export const useManhuntGameStore = create<ManhuntGameStateStore>((set, get) => (
       result: null,
       countdown: null,
       countdownServerOffsetMs: null,
+      serverTimeOffsetMs: 0,
       catchPending: false,
       catchRequestStatus: null,
       error: null,

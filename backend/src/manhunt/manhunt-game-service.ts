@@ -596,23 +596,48 @@ export class ManhuntGameService {
   onPlayerRemoved(roomCode: RoomCode, roomStillExists: boolean): void {
     const game = this.currentGames.get(roomCode);
     if (!game) return;
+    if (!roomStillExists) {
+      this.clearSession(roomCode);
+      return;
+    }
     if (game.session.state.phase === "countdown") {
       this.cancelCountdown(
         roomCode,
         game,
-        roomStillExists ? "player_left" : "room_unavailable",
+        "player_left",
       );
       return;
     }
+    if (game.session.status !== "in_progress") return;
+
     const room = this.rooms.getPublicRoom(roomCode);
     const removedPlayerId = [...game.teams.keys()].find(
       (playerId) => !room?.players.some((player) => player.id === playerId),
     );
-    if (removedPlayerId) {
-      this.deactivatePlayer(game, removedPlayerId);
-    }
-    if (!roomStillExists) {
-      this.clearSession(roomCode);
+    if (!removedPlayerId) return;
+
+    this.deactivatePlayer(game, removedPlayerId);
+    game.teams.delete(removedPlayerId);
+    game.readyPlayerIds.delete(removedPlayerId);
+    game.session.state.teams = game.session.state.teams.filter(
+      (assignment) => assignment.playerId !== removedPlayerId,
+    );
+    game.session.state.readyPlayerIds =
+      game.session.state.readyPlayerIds.filter(
+        (playerId) => playerId !== removedPlayerId,
+      );
+    this.events.stateUpdated(roomCode, {
+      sessionId: game.session.id,
+      roomCode,
+      state: game.session.state,
+      updatedAt: this.runtime.now().toISOString(),
+    });
+
+    const remainingRunners = [...game.teams.entries()]
+      .filter(([, team]) => team === "runner")
+      .map(([playerId]) => playerId);
+    if (remainingRunners.every((playerId) => game.caughtPlayerIds.has(playerId))) {
+      this.endGame(game, "hunter");
     }
   }
 
@@ -684,7 +709,17 @@ export class ManhuntGameService {
     game.session.state.nextShrinkAt = new Date(now.getTime() + firstShrinkSeconds * 1_000).toISOString();
     game.session.state.shrinkStage = 0;
     game.gameTimer = this.runtime.schedule(
-      () => this.endGame(game, "runner"),
+      () => {
+        const current = this.currentGames.get(roomCode);
+        if (
+          current !== game ||
+          current.session.id !== sessionId ||
+          current.session.status !== "in_progress"
+        ) {
+          return;
+        }
+        this.endGame(game, "runner");
+      },
       durationSeconds * 1_000,
     );
     this.scheduleZoneWarning(roomCode, firstShrinkSeconds * 1_000);
@@ -884,7 +919,10 @@ export class ManhuntGameService {
   }
 
   private endGame(game: ManhuntRecord, winningTeam: "hunter" | "runner"): void {
-    if (game.session.status !== "in_progress") {
+    if (
+      this.currentGames.get(game.roomCode) !== game ||
+      game.session.status !== "in_progress"
+    ) {
       return;
     }
     game.session.status = "finished";

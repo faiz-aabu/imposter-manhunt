@@ -57,6 +57,9 @@ export default function MapRoute() {
   );
   const [catchAnnouncement, setCatchAnnouncement] =
     useState<CatchConfirmedPayload | null>(null);
+  const serverTimeOffsetMs = useManhuntGameStore(
+    (state) => state.serverTimeOffsetMs,
+  );
   const catchResponseBusyRef = useRef(false);
   const lastLocationSentAt = useRef(0);
 
@@ -227,6 +230,7 @@ export default function MapRoute() {
     ? Date.parse(manhunt.reveal.visibleUntil)
     : 0;
   const now = Math.max(clockNow, Date.now());
+  const serverNow = now + serverTimeOffsetMs;
   const visibleRevealRemaining = Number.isFinite(revealVisibleUntil)
     ? Math.max(0, Math.ceil((revealVisibleUntil - now) / 1_000))
     : 0;
@@ -235,12 +239,21 @@ export default function MapRoute() {
     ? manhunt.reveal?.locations ?? []
     : [];
   const formattedRevealTime = `00:${String(visibleRevealRemaining).padStart(2, "0")}`;
-  const gameEndsAt = manhunt.gameState?.gameEndsAt ? Date.parse(manhunt.gameState.gameEndsAt) : 0;
-  const gameRemainingSeconds = gameEndsAt > 0 ? Math.max(0, Math.ceil((gameEndsAt - now) / 1_000)) : 0;
-  const formattedGameTime = `${String(Math.floor(gameRemainingSeconds / 60)).padStart(2, "0")}:${String(gameRemainingSeconds % 60).padStart(2, "0")}`;
-  const shrinkWarningEndsAt = manhunt.gameState?.shrinkWarningEndsAt ? Date.parse(manhunt.gameState.shrinkWarningEndsAt) : 0;
-  const shrinkCountdownRemaining = shrinkWarningEndsAt > now
-    ? Math.max(0, Math.ceil((shrinkWarningEndsAt - now) / 1_000))
+  const gameEndsAt = manhunt.gameState?.gameEndsAt
+    ? Date.parse(manhunt.gameState.gameEndsAt)
+    : Number.NaN;
+  const gameRemainingSeconds = Number.isFinite(gameEndsAt)
+    ? Math.max(0, Math.ceil((gameEndsAt - serverNow) / 1_000))
+    : null;
+  const formattedGameTime = gameRemainingSeconds === null
+    ? "--:--"
+    : `${String(Math.floor(gameRemainingSeconds / 60)).padStart(2, "0")}:${String(gameRemainingSeconds % 60).padStart(2, "0")}`;
+  const shrinkWarningEndsAt = manhunt.gameState?.shrinkWarningEndsAt
+    ? Date.parse(manhunt.gameState.shrinkWarningEndsAt)
+    : Number.NaN;
+  const shrinkCountdownRemaining = Number.isFinite(shrinkWarningEndsAt) &&
+    shrinkWarningEndsAt > serverNow
+    ? Math.max(0, Math.ceil((shrinkWarningEndsAt - serverNow) / 1_000))
     : 0;
 
   const attemptCatch = () => {

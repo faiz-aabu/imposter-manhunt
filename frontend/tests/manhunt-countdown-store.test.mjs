@@ -60,14 +60,18 @@ test("official active state clears countdown display data", () => {
   store.reset();
   store.setSession(session("session-1"), []);
   store.setCountdown(countdown("session-1"), 1_767_225_590_000);
+  const updatedAt = "2026-01-01T00:00:10.000Z";
+  const receivedAt = Date.parse(updatedAt) - 2_500;
   store.setGameState({
     roomCode: "ABCD",
     sessionId: "session-1",
-    updatedAt: "2026-01-01T00:00:10.000Z",
+    updatedAt,
     state: session("session-1", "active").state,
-  });
+  }, receivedAt);
 
   assert.equal(useManhuntGameStore.getState().gameState.phase, "active");
   assert.equal(useManhuntGameStore.getState().countdown, null);
+  assert.equal(useManhuntGameStore.getState().countdownServerOffsetMs, null);
+  assert.equal(useManhuntGameStore.getState().serverTimeOffsetMs, 2_500);
   store.reset();
 });
