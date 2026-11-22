@@ -541,6 +541,7 @@ const styles = StyleSheet.create({
   },
   stepperControls: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: spacing.sm,
   },
   locationStatus: {
