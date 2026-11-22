@@ -768,6 +768,12 @@ export class ManhuntGameService {
         delete current.session.state.zoneShrinkFromRadiusMeters;
         delete current.session.state.zoneShrinkToRadiusMeters;
         delete current.session.state.zoneShrinkEndsAt;
+        this.events.stateUpdated(roomCode, {
+          sessionId,
+          roomCode,
+          state: current.session.state,
+          updatedAt: this.runtime.now().toISOString(),
+        });
         if (current.session.state.nextShrinkAt) {
           const nextDelay = Date.parse(current.session.state.nextShrinkAt) - this.runtime.now().getTime();
           this.scheduleZoneWarning(roomCode, Math.max(0, nextDelay));
