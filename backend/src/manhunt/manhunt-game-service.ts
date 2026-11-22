@@ -9,6 +9,10 @@ import {
   MANHUNT_PROXIMITY_COOLDOWN_SECONDS,
   MANHUNT_PROXIMITY_NEAR_METERS,
   MANHUNT_PROXIMITY_STRONG_METERS,
+  MANHUNT_ZONE_WARNING_SECONDS,
+  MANHUNT_ZONE_SHRINK_DURATION_SECONDS,
+  MANHUNT_ZONE_MIN_RADIUS_METERS,
+  DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
   manhuntSettingsSchema,
 } from "@impostor/api";
 import type {
@@ -73,6 +77,9 @@ interface ManhuntRecord {
   cycleTimer?: GameTimer;
   countdownTimer?: GameTimer;
   revealTimer?: GameTimer;
+  gameTimer?: GameTimer;
+  zoneWarningTimer?: GameTimer;
+  zoneShrinkTimer?: GameTimer;
   revealActive: boolean;
   caughtPlayerIds: Set<PlayerId>;
   result?: GameEndedPayload;
@@ -564,7 +571,7 @@ export class ManhuntGameService {
       .filter(([, team]) => team === "runner")
       .map(([runnerId]) => runnerId);
     if (runners.every((runnerId) => game.caughtPlayerIds.has(runnerId))) {
-      this.endGame(game, request.hunterId);
+      this.endGame(game, "hunter");
     }
   }
 
@@ -619,6 +626,9 @@ export class ManhuntGameService {
       game.cycleTimer?.cancel();
       game.countdownTimer?.cancel();
       game.revealTimer?.cancel();
+      game.gameTimer?.cancel();
+      game.zoneWarningTimer?.cancel();
+      game.zoneShrinkTimer?.cancel();
       game.locations.clear();
       game.proximityPairs.clear();
       game.readyPlayerIds.clear();
@@ -674,7 +684,96 @@ export class ManhuntGameService {
       state: game.session.state,
       updatedAt: activeSince,
     });
+    const durationSeconds = game.session.state.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
+    const gameEndsAt = new Date(now.getTime() + durationSeconds * 1_000).toISOString();
+    const firstShrinkSeconds = Math.floor(durationSeconds / 3);
+    const secondShrinkSeconds = Math.floor((durationSeconds * 2) / 3);
+    game.session.state.gameEndsAt = gameEndsAt;
+    game.session.state.nextShrinkAt = new Date(now.getTime() + firstShrinkSeconds * 1_000).toISOString();
+    game.session.state.shrinkStage = 0;
+    game.gameTimer = this.runtime.schedule(
+      () => this.endGame(game, "runner"),
+      durationSeconds * 1_000,
+    );
+    this.scheduleZoneWarning(roomCode, firstShrinkSeconds * 1_000);
     this.scheduleNextReveal(roomCode);
+  }
+
+  private scheduleZoneWarning(roomCode: RoomCode, delayMs: number): void {
+    const game = this.currentGames.get(roomCode);
+    if (!game || game.session.status !== "in_progress") return;
+    game.zoneWarningTimer?.cancel();
+    game.zoneWarningTimer = this.runtime.schedule(() => {
+      const current = this.currentGames.get(roomCode);
+      if (!current || current !== game || current.session.status !== "in_progress") return;
+      const nextShrinkAt = current.session.state.nextShrinkAt;
+      if (!nextShrinkAt) return;
+      const warningAt = this.runtime.now();
+      current.session.state.shrinkWarningEndsAt = nextShrinkAt;
+      this.events.stateUpdated(roomCode, {
+        sessionId: current.session.id,
+        roomCode,
+        state: current.session.state,
+        updatedAt: warningAt.toISOString(),
+      });
+      current.zoneWarningTimer = this.runtime.schedule(
+        () => this.beginZoneShrink(roomCode, current.session.id),
+        MANHUNT_ZONE_WARNING_SECONDS * 1_000,
+      );
+    }, Math.max(0, delayMs - MANHUNT_ZONE_WARNING_SECONDS * 1_000));
+  }
+
+  private beginZoneShrink(roomCode: RoomCode, sessionId: GameSessionId): void {
+    const game = this.currentGames.get(roomCode);
+    if (!game || game.session.id !== sessionId || game.session.status !== "in_progress") return;
+    const state = game.session.state;
+    const stage = state.shrinkStage ?? 0;
+    const fromRadius = state.settings.boundary.radiusMeters;
+    const reduction = stage === 0 ? 0.15 : 0.25;
+    const toRadius = Math.max(MANHUNT_ZONE_MIN_RADIUS_METERS, Math.round(fromRadius * (1 - reduction)));
+    const startedAt = this.runtime.now().getTime();
+    const endsAt = startedAt + MANHUNT_ZONE_SHRINK_DURATION_SECONDS * 1_000;
+    state.zoneShrinkFromRadiusMeters = fromRadius;
+    state.zoneShrinkToRadiusMeters = toRadius;
+    state.zoneShrinkEndsAt = new Date(endsAt).toISOString();
+    state.shrinkStage = stage + 1;
+    delete state.shrinkWarningEndsAt;
+    const durationSeconds = state.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
+    const nextStageSeconds = Math.floor((durationSeconds * (stage + 2)) / 3);
+    state.nextShrinkAt = stage === 0
+      ? new Date(Date.parse(state.activeSince!) + nextStageSeconds * 1_000).toISOString()
+      : undefined;
+    const updateRadius = () => {
+      const current = this.currentGames.get(roomCode);
+      if (!current || current !== game || current.session.id !== sessionId || current.session.status !== "in_progress") return;
+      const elapsed = Math.min(1, (this.runtime.now().getTime() - startedAt) / (MANHUNT_ZONE_SHRINK_DURATION_SECONDS * 1_000));
+      const radius = Math.round(fromRadius + (toRadius - fromRadius) * elapsed);
+      current.session.state.settings.boundary.radiusMeters = Math.max(MANHUNT_ZONE_MIN_RADIUS_METERS, radius);
+      this.events.stateUpdated(roomCode, {
+        sessionId,
+        roomCode,
+        state: current.session.state,
+        updatedAt: this.runtime.now().toISOString(),
+      });
+      if (elapsed < 1) {
+        current.zoneShrinkTimer = this.runtime.schedule(updateRadius, 1_000);
+      } else {
+        delete current.session.state.zoneShrinkFromRadiusMeters;
+        delete current.session.state.zoneShrinkToRadiusMeters;
+        delete current.session.state.zoneShrinkEndsAt;
+        if (current.session.state.nextShrinkAt) {
+          const nextDelay = Date.parse(current.session.state.nextShrinkAt) - this.runtime.now().getTime();
+          this.scheduleZoneWarning(roomCode, Math.max(0, nextDelay));
+        }
+      }
+    };
+    this.events.stateUpdated(roomCode, {
+      sessionId,
+      roomCode,
+      state,
+      updatedAt: this.runtime.now().toISOString(),
+    });
+    updateRadius();
   }
 
   private createCountdownPayload(game: ManhuntRecord): CountdownPayload {
@@ -777,7 +876,7 @@ export class ManhuntGameService {
     this.scheduleNextReveal(roomCode);
   }
 
-  private endGame(game: ManhuntRecord, hunterId: PlayerId): void {
+  private endGame(game: ManhuntRecord, winningTeam: "hunter" | "runner"): void {
     if (game.session.status !== "in_progress") {
       return;
     }
@@ -786,6 +885,9 @@ export class ManhuntGameService {
     game.session.state.phase = "finished";
     game.cycleTimer?.cancel();
     game.revealTimer?.cancel();
+    game.gameTimer?.cancel();
+    game.zoneWarningTimer?.cancel();
+    game.zoneShrinkTimer?.cancel();
     game.revealActive = false;
     for (const request of [...game.pendingCatchRequests.values()]) {
       this.finishPendingCatch(game, request, "cancelled");
@@ -796,8 +898,8 @@ export class ManhuntGameService {
       game.roomCode,
       game.session.id,
     );
-    const hunterIds = [...game.teams.entries()]
-      .filter(([, team]) => team === "hunter")
+    const winnerIds = [...game.teams.entries()]
+      .filter(([, team]) => team === winningTeam)
       .map(([playerId]) => playerId);
     this.events.roomUpdated(publicRoom ?? this.rooms.getPublicRoom(game.roomCode)!);
     const ended: GameEndedPayload = {
@@ -806,7 +908,7 @@ export class ManhuntGameService {
         roomCode: game.roomCode,
         gameMode: "manhunt",
         outcome: "win",
-        winnerPlayerIds: hunterIds,
+        winnerPlayerIds: winnerIds,
         endedAt: game.session.endedAt,
       },
     };
