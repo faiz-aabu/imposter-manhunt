@@ -20,10 +20,16 @@ import {
   MANHUNT_CATCH_DISTANCE_METERS,
   MANHUNT_CATCH_REQUEST_DURATION_SECONDS,
   MANHUNT_COUNTDOWN_DURATION_SECONDS,
+  DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
+  MANHUNT_GAME_DURATION_OPTIONS_SECONDS,
   MANHUNT_LOCATION_MAX_AGE_SECONDS,
+  manhuntSettingsSchema,
   MANHUNT_PROXIMITY_COOLDOWN_SECONDS,
 } from "@impostor/api";
-import { ManhuntGameService } from "./manhunt-game-service.js";
+import {
+  determineManhuntTimeoutWinner,
+  ManhuntGameService,
+} from "./manhunt-game-service.js";
 import type { ManhuntGameEvents } from "./manhunt-game-service.js";
 import { RoomService } from "../rooms/room-service.js";
 import { AppError } from "../utils/app-error.js";
@@ -239,6 +245,86 @@ test("Manhunt settings are host-only and invalid boundary settings are rejected"
   );
 });
 
+test("Manhunt duration settings accept only the supported choices and default to 30 minutes", () => {
+  const harness = createHarness();
+  assert.equal(
+    harness.service.updateSettings(
+      harness.roomCode,
+      harness.hostSocket,
+      validSettings,
+    ).gameDurationSeconds,
+    DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
+  );
+
+  for (const duration of MANHUNT_GAME_DURATION_OPTIONS_SECONDS) {
+    const parsed = manhuntSettingsSchema.safeParse({
+      ...validSettings,
+      gameDurationSeconds: duration,
+    });
+    assert.equal(parsed.success, true);
+    if (parsed.success) {
+      assert.equal(parsed.data.gameDurationSeconds, duration);
+    }
+    assert.equal(
+      harness.service.updateSettings(
+        harness.roomCode,
+        harness.hostSocket,
+        { ...validSettings, gameDurationSeconds: duration },
+      ).gameDurationSeconds,
+      duration,
+    );
+  }
+
+  for (const duration of [0, 1_801, 2_699, 3_601, "1800", null]) {
+    assert.equal(
+      manhuntSettingsSchema.safeParse({
+        ...validSettings,
+        gameDurationSeconds: duration,
+      }).success,
+      false,
+    );
+  }
+});
+
+test("Manhunt duration cannot be changed after the game starts", () => {
+  const harness = createHarness();
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 2_700,
+  });
+  const session = startActiveGame(harness);
+
+  assert.throws(
+    () =>
+      harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+        ...validSettings,
+        gameDurationSeconds: 3_600,
+      }),
+    (error: unknown) =>
+      error instanceof AppError && error.code === "GAME_NOT_ACTIVE",
+  );
+  assert.equal(session.state.settings.gameDurationSeconds, 2_700);
+});
+
+test("timeout awards Runners only while an uncaught Runner remains", () => {
+  const teams = new Map<string, "hunter" | "runner">([
+    ["hunter-1", "hunter"],
+    ["runner-1", "runner"],
+    ["runner-2", "runner"],
+  ]);
+  assert.equal(
+    determineManhuntTimeoutWinner(teams, new Set(["runner-1"])),
+    "runner",
+  );
+  assert.equal(
+    determineManhuntTimeoutWinner(
+      teams,
+      new Set(["runner-1", "runner-2"]),
+    ),
+    "hunter",
+  );
+});
+
 test("Manhunt start requires authorization, enough players, and assigns exactly hunterCount hunters", () => {
   const harness = createHarness();
   harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
@@ -319,12 +405,32 @@ test("gameplay location updates are rejected until countdown expires and remain 
 
 test("reconnect preserves the existing team assignment and session cleanup clears private state", () => {
   const harness = createHarness();
-  harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
-  startActiveGame(harness);
+  harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+    ...validSettings,
+    gameDurationSeconds: 2_700,
+  });
+  const session = startActiveGame(harness);
   const before = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!);
+  assert.ok(before);
+  assert.ok("settings" in before.state.state);
+  assert.equal(before.state.state.settings.gameDurationSeconds, 2_700);
+  assert.equal(before.state.state.gameEndsAt, session.state.gameEndsAt);
+  const remainingBeforeReconnect =
+    Date.parse(before.state.state.gameEndsAt ?? "") -
+    Date.parse(before.state.updatedAt);
+  harness.runtime.advance(15_000);
   harness.service.recordLocation(harness.roomCode, "host", validSettings.boundary.center);
   const after = harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!);
   assert.deepEqual(before?.state.state, after?.state.state);
+  assert.ok(after);
+  assert.ok("settings" in after.state.state);
+  assert.equal(after.state.state.settings.gameDurationSeconds, 2_700);
+  assert.equal(after.state.state.gameEndsAt, session.state.gameEndsAt);
+  assert.equal(
+    Date.parse(after.state.state.gameEndsAt ?? "") -
+      Date.parse(after.state.updatedAt),
+    remainingBeforeReconnect - 15_000,
+  );
   harness.service.onPlayerRemoved(harness.roomCode, false);
   assert.equal(harness.service.getResumeSnapshot(harness.roomCode, harness.playerIds[0]!), undefined);
 });
@@ -436,6 +542,130 @@ test("game cleanup cancels a pending Manhunt countdown timer", () => {
     harness.states.some((entry) => entry.state.phase === "active"),
     false,
   );
+});
+
+test("match duration expires from the server activation deadline for every choice", () => {
+  for (const duration of MANHUNT_GAME_DURATION_OPTIONS_SECONDS) {
+    const runtime = new ManualRuntime();
+    const harness = createHarness(4, runtime);
+    harness.service.updateSettings(harness.roomCode, harness.hostSocket, {
+      ...validSettings,
+      gameDurationSeconds: duration,
+    });
+    const session = startActiveGame(harness);
+    const activeSince = session.state.activeSince;
+    const gameEndsAt = session.state.gameEndsAt;
+    assert.ok(activeSince);
+    assert.ok(gameEndsAt);
+    assert.equal(
+      Date.parse(gameEndsAt) - Date.parse(activeSince),
+      duration * 1_000,
+    );
+    assert.equal(session.state.settings.gameDurationSeconds, duration);
+
+    runtime.advance(duration * 1_000 - 1);
+    assert.equal(session.status, "in_progress");
+    assert.equal(harness.ended.length, 0);
+    runtime.advance(1);
+
+    const runnerIds = session.state.teams
+      .filter(({ team }) => team === "runner")
+      .map(({ playerId }) => playerId)
+      .sort();
+    assert.equal(session.status, "finished");
+    assert.equal(session.state.phase, "finished");
+    assert.equal(session.endedAt, gameEndsAt);
+    assert.equal(harness.ended[0]?.result.endedAt, gameEndsAt);
+    assert.deepEqual(
+      [...(harness.ended[0]?.result.winnerPlayerIds ?? [])].sort(),
+      runnerIds,
+    );
+    assert.equal(runtime.pendingTimerCount, 0);
+
+    runtime.runCancelledCallbacks();
+    assert.equal(harness.ended.length, 1);
+  }
+});
+
+test("timeout awards every Runner when one was caught and another remains uncaught", () => {
+  const runtime = new ManualRuntime();
+  const harness = createHarness(3, runtime);
+  harness.service.updateSettings(
+    harness.roomCode,
+    harness.hostSocket,
+    validSettings,
+  );
+  const session = startActiveGame(harness);
+  const hunter = session.state.teams.find(({ team }) => team === "hunter")!;
+  const runners = session.state.teams.filter(({ team }) => team === "runner");
+  const caughtRunner = runners[0]!;
+  const hunterSocket = socketIdForPlayer(harness, hunter.playerId);
+  const caughtRunnerSocket = socketIdForPlayer(harness, caughtRunner.playerId);
+
+  harness.service.recordLocation(harness.roomCode, hunterSocket, {
+    latitude: 0,
+    longitude: 0,
+  });
+  harness.service.recordLocation(harness.roomCode, caughtRunnerSocket, {
+    latitude: 0,
+    longitude: eastOffsetMeters(1.4),
+  });
+  const request = harness.service.attemptCatch(
+    harness.roomCode,
+    hunterSocket,
+    caughtRunner.playerId,
+  );
+  harness.service.respondToCatch(
+    harness.roomCode,
+    caughtRunnerSocket,
+    request.requestId,
+    true,
+  );
+  assert.equal(harness.caught.length, 1);
+  assert.equal(harness.ended.length, 0);
+
+  runtime.advance(DEFAULT_MANHUNT_GAME_DURATION_SECONDS * 1_000);
+
+  const runnerIds = runners.map(({ playerId }) => playerId).sort();
+  const hunterIds = session.state.teams
+    .filter(({ team }) => team === "hunter")
+    .map(({ playerId }) => playerId);
+  const winnerIds = [...(harness.ended[0]?.result.winnerPlayerIds ?? [])].sort();
+  assert.equal(session.status, "finished");
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(winnerIds, runnerIds);
+  assert.equal(winnerIds.includes(caughtRunner.playerId), true);
+  assert.equal(winnerIds.some((playerId) => hunterIds.includes(playerId)), false);
+  assert.equal(runtime.pendingTimerCount, 0);
+
+  runtime.runCancelledCallbacks();
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    [...(harness.ended[0]?.result.winnerPlayerIds ?? [])].sort(),
+    runnerIds,
+  );
+});
+
+test("active match-duration timers are cancelled on session cleanup, room removal, and shutdown", () => {
+  for (const cleanup of ["session", "room", "shutdown"] as const) {
+    const runtime = new ManualRuntime();
+    const harness = createHarness(3, runtime);
+    harness.service.updateSettings(harness.roomCode, harness.hostSocket, validSettings);
+    startActiveGame(harness);
+    assert.equal(runtime.pendingTimerCount, 2);
+
+    if (cleanup === "session") {
+      harness.service.clearSession(harness.roomCode);
+    } else if (cleanup === "room") {
+      harness.service.onPlayerRemoved(harness.roomCode, false);
+    } else {
+      harness.service.shutdown();
+    }
+
+    assert.equal(runtime.pendingTimerCount, 0);
+    runtime.advance(3_600 * 1_000);
+    assert.equal(harness.ended.length, 0);
+  }
 });
 
 test("reveal cycle opens at 20 seconds for five seconds and repeats", () => {
@@ -568,7 +798,21 @@ test("catch requests accept exactly 1.5 metres and only mark caught after civili
   assert.equal(harness.catchConfirmed.length, 2);
   assert.equal(harness.ended.length, 1);
   assert.equal(harness.ended[0]?.result.outcome, "win");
+  const hunterIds = session.state.teams
+    .filter(({ team }) => team === "hunter")
+    .map(({ playerId }) => playerId)
+    .sort();
+  assert.deepEqual(
+    [...(harness.ended[0]?.result.winnerPlayerIds ?? [])].sort(),
+    hunterIds,
+  );
   assert.equal(harness.runtime.pendingTimerCount, 0);
+  harness.runtime.runCancelledCallbacks();
+  assert.equal(harness.ended.length, 1);
+  assert.deepEqual(
+    [...(harness.ended[0]?.result.winnerPlayerIds ?? [])].sort(),
+    hunterIds,
+  );
 });
 
 test("catch requests reject distant and stale locations, and only hunters may request", () => {

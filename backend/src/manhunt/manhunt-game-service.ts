@@ -3,6 +3,7 @@ import {
   MANHUNT_CATCH_DISTANCE_METERS,
   MANHUNT_CATCH_REQUEST_DURATION_SECONDS,
   MANHUNT_COUNTDOWN_DURATION_SECONDS,
+  DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
   MANHUNT_LOCATION_FLASH_INTERVAL_SECONDS,
   MANHUNT_LOCATION_MAX_AGE_SECONDS,
   MANHUNT_LOCATION_REVEAL_DURATION_SECONDS,
@@ -60,6 +61,17 @@ interface PairProximityState {
   lastVeryNearAt?: number;
 }
 
+export function determineManhuntTimeoutWinner(
+  teams: ReadonlyMap<PlayerId, "hunter" | "runner">,
+  caughtPlayerIds: ReadonlySet<PlayerId>,
+): "hunter" | "runner" {
+  const hasUncaughtRunner = [...teams].some(
+    ([playerId, team]) =>
+      team === "runner" && !caughtPlayerIds.has(playerId),
+  );
+  return hasUncaughtRunner ? "runner" : "hunter";
+}
+
 interface ManhuntRecord {
   roomCode: RoomCode;
   session: Extract<GameSession, { gameMode: "manhunt" }>;
@@ -72,6 +84,7 @@ interface ManhuntRecord {
   proximityPairs: Map<string, PairProximityState>;
   cycleTimer?: GameTimer;
   countdownTimer?: GameTimer;
+  gameDurationTimer?: GameTimer;
   revealTimer?: GameTimer;
   revealActive: boolean;
   caughtPlayerIds: Set<PlayerId>;
@@ -179,7 +192,12 @@ export class ManhuntGameService {
     const teams = new Map(assignments.map((assignment) => [assignment.playerId, assignment.team]));
     const state: ManhuntGameState = {
       phase: "countdown",
-      settings: settings.data,
+      settings: {
+        ...settings.data,
+        gameDurationSeconds:
+          settings.data.gameDurationSeconds ??
+          DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
+      },
       teams: assignments,
       readyPlayerIds: [...(this.pendingReadyPlayerIds.get(roomCode) ?? [])],
       countdownEndsAt: new Date(
@@ -564,7 +582,7 @@ export class ManhuntGameService {
       .filter(([, team]) => team === "runner")
       .map(([runnerId]) => runnerId);
     if (runners.every((runnerId) => game.caughtPlayerIds.has(runnerId))) {
-      this.endGame(game, request.hunterId);
+      this.endGame(game, "hunter");
     }
   }
 
@@ -618,6 +636,7 @@ export class ManhuntGameService {
       }
       game.cycleTimer?.cancel();
       game.countdownTimer?.cancel();
+      game.gameDurationTimer?.cancel();
       game.revealTimer?.cancel();
       game.locations.clear();
       game.proximityPairs.clear();
@@ -664,6 +683,14 @@ export class ManhuntGameService {
     game.session.startedAt = activeSince;
     game.session.state.phase = "active";
     game.session.state.activeSince = activeSince;
+    const gameDurationSeconds =
+      game.session.state.settings.gameDurationSeconds ??
+      DEFAULT_MANHUNT_GAME_DURATION_SECONDS;
+    game.session.state.settings.gameDurationSeconds = gameDurationSeconds;
+    const gameEndsAt = new Date(
+      now.getTime() + gameDurationSeconds * 1_000,
+    ).toISOString();
+    game.session.state.gameEndsAt = gameEndsAt;
     delete game.session.state.countdownEndsAt;
 
     const activeRoom = this.rooms.activateGame(roomCode, sessionId);
@@ -675,6 +702,37 @@ export class ManhuntGameService {
       updatedAt: activeSince,
     });
     this.scheduleNextReveal(roomCode);
+    this.scheduleGameDurationEnd(roomCode, sessionId, game, gameEndsAt);
+  }
+
+  private scheduleGameDurationEnd(
+    roomCode: RoomCode,
+    sessionId: GameSessionId,
+    game: ManhuntRecord,
+    gameEndsAt: string,
+  ): void {
+    game.gameDurationTimer?.cancel();
+    game.gameDurationTimer = this.runtime.schedule(() => {
+      game.gameDurationTimer = undefined;
+      const current = this.currentGames.get(roomCode);
+      if (
+        current !== game ||
+        current.session.id !== sessionId ||
+        current.session.status !== "in_progress" ||
+        current.session.state.phase !== "active"
+      ) {
+        return;
+      }
+
+      this.endGame(
+        current,
+        determineManhuntTimeoutWinner(
+          current.teams,
+          current.caughtPlayerIds,
+        ),
+        gameEndsAt,
+      );
+    }, Math.max(0, Date.parse(gameEndsAt) - this.runtime.now().getTime()));
   }
 
   private createCountdownPayload(game: ManhuntRecord): CountdownPayload {
@@ -777,14 +835,20 @@ export class ManhuntGameService {
     this.scheduleNextReveal(roomCode);
   }
 
-  private endGame(game: ManhuntRecord, hunterId: PlayerId): void {
+  private endGame(
+    game: ManhuntRecord,
+    winningTeam: "hunter" | "runner",
+    endedAt = this.runtime.now().toISOString(),
+  ): void {
     if (game.session.status !== "in_progress") {
       return;
     }
     game.session.status = "finished";
-    game.session.endedAt = this.runtime.now().toISOString();
+    game.session.endedAt = endedAt;
     game.session.state.phase = "finished";
     game.cycleTimer?.cancel();
+    game.gameDurationTimer?.cancel();
+    game.gameDurationTimer = undefined;
     game.revealTimer?.cancel();
     game.revealActive = false;
     for (const request of [...game.pendingCatchRequests.values()]) {
@@ -796,8 +860,8 @@ export class ManhuntGameService {
       game.roomCode,
       game.session.id,
     );
-    const hunterIds = [...game.teams.entries()]
-      .filter(([, team]) => team === "hunter")
+    const winnerIds = [...game.teams.entries()]
+      .filter(([, team]) => team === winningTeam)
       .map(([playerId]) => playerId);
     this.events.roomUpdated(publicRoom ?? this.rooms.getPublicRoom(game.roomCode)!);
     const ended: GameEndedPayload = {
@@ -806,7 +870,7 @@ export class ManhuntGameService {
         roomCode: game.roomCode,
         gameMode: "manhunt",
         outcome: "win",
-        winnerPlayerIds: hunterIds,
+        winnerPlayerIds: winnerIds,
         endedAt: game.session.endedAt,
       },
     };

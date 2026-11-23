@@ -1,4 +1,8 @@
-import { GAME_MODES, WORD_IMPOSTOR_CATEGORIES } from "../constants.js";
+import {
+  GAME_MODES,
+  MANHUNT_GAME_DURATION_OPTIONS_SECONDS,
+  WORD_IMPOSTOR_CATEGORIES,
+} from "../constants.js";
 
 export type PlayerId = string;
 export type RoomCode = string;
@@ -79,6 +83,8 @@ export interface ImpostorGameState {
 
 export type ManhuntPhase = "setup" | "countdown" | "active" | "finished";
 export type ManhuntTeam = "hunter" | "runner";
+export type ManhuntGameDurationSeconds =
+  (typeof MANHUNT_GAME_DURATION_OPTIONS_SECONDS)[number];
 
 export interface ManhuntBoundary {
   center: Coordinates;
@@ -87,6 +93,7 @@ export interface ManhuntBoundary {
 
 export interface ManhuntSettings {
   hunterCount: number;
+  gameDurationSeconds?: ManhuntGameDurationSeconds;
   boundary: ManhuntBoundary;
 }
 
@@ -102,6 +109,7 @@ export interface ManhuntGameState {
   readyPlayerIds: PlayerId[];
   countdownEndsAt?: ISODateString;
   activeSince?: ISODateString;
+  gameEndsAt?: ISODateString;
   nextLocationFlashAt?: ISODateString;
 }
 

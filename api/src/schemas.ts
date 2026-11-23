@@ -17,6 +17,8 @@ import {
   MIN_MANHUNT_HUNTERS,
   MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
   MAX_MANHUNT_BOUNDARY_RADIUS_METERS,
+  DEFAULT_MANHUNT_GAME_DURATION_SECONDS,
+  MANHUNT_GAME_DURATION_OPTIONS_SECONDS,
 } from "./constants.js";
 import type {
   CatchAttemptPayload,
@@ -136,6 +138,13 @@ export const manhuntBoundarySchema = z
 export const manhuntSettingsSchema = z
   .object({
     hunterCount: z.number().int().min(MIN_MANHUNT_HUNTERS).max(MAX_PLAYERS_PER_ROOM - 1),
+    gameDurationSeconds: z
+      .union([
+        z.literal(MANHUNT_GAME_DURATION_OPTIONS_SECONDS[0]),
+        z.literal(MANHUNT_GAME_DURATION_OPTIONS_SECONDS[1]),
+        z.literal(MANHUNT_GAME_DURATION_OPTIONS_SECONDS[2]),
+      ])
+      .default(DEFAULT_MANHUNT_GAME_DURATION_SECONDS),
     boundary: manhuntBoundarySchema,
   })
   .strict() satisfies z.ZodType<ManhuntSettings>;
