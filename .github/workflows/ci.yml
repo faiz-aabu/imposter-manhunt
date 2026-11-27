@@ -3,10 +3,14 @@ name: CI
 on:
   pull_request:
     branches:
+      - main
       - staging/backend-auth
+      - integration/manhunt-combined
   push:
     branches:
+      - main
       - feature/manhunt-shrinking-zone-timer
+      - integration/manhunt-combined
 
 permissions:
   contents: read
@@ -17,9 +21,9 @@ concurrency:
 
 jobs:
   validate:
-    name: TypeScript and backend tests
+    name: TypeScript and backend unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -34,3 +38,59 @@ jobs:
         run: npm run typecheck
       - name: Run backend tests
         run: npm test --workspace=backend
+
+  frontend-tests:
+    name: Frontend logic tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run frontend tests
+        run: npm test --workspace=frontend
+
+  postgres-integration:
+    name: Durable room PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DURABLE_ROOM_CI_DATABASE: "1"
+      ROOM_REPOSITORY_TEST_DATABASE: durable_room_test
+      ROOM_REPOSITORY_TEST_USER: postgres
+      ROOM_RUNTIME_FENCING_TEST_DATABASE: durable_room_test
+      ROOM_RUNTIME_FENCING_TEST_USER: postgres
+      ROOM_RUNTIME_LEASE_TEST_DATABASE: durable_room_test
+      ROOM_RUNTIME_LEASE_TEST_USER: postgres
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: durable_room_test
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d durable_room_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Apply durable-room migrations and run PostgreSQL integration tests
+        run: npm run test:postgres --workspace=backend
