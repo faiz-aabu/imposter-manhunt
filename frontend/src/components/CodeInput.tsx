@@ -9,6 +9,7 @@ import type {
   TextInputKeyPressEvent,
 } from "react-native";
 import type { StyleProp, ViewStyle } from "react-native";
+import { useTranslation } from "../i18n/use-translation";
 import { colors, radii, spacing, typography } from "../theme";
 
 const CODE_LENGTH = 4;
@@ -16,10 +17,17 @@ const CODE_LENGTH = 4;
 interface CodeInputProps {
   value: string;
   onChangeText: (value: string) => void;
+  accessibilityLabelForIndex?: (index: number, total: number) => string;
   style?: StyleProp<ViewStyle>;
 }
 
-export function CodeInput({ value, onChangeText, style }: CodeInputProps) {
+export function CodeInput({
+  value,
+  onChangeText,
+  accessibilityLabelForIndex,
+  style,
+}: CodeInputProps) {
+  const t = useTranslation();
   const inputs = useRef<Array<TextInputInstance | null>>([]);
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const characters = sanitizeCode(value).split("");
@@ -76,7 +84,13 @@ export function CodeInput({ value, onChangeText, style }: CodeInputProps) {
           ref={(input) => {
             inputs.current[index] = input;
           }}
-          accessibilityLabel={`Room code character ${index + 1} of ${CODE_LENGTH}`}
+          accessibilityLabel={
+            accessibilityLabelForIndex?.(index + 1, CODE_LENGTH) ??
+            t("common.roomCodeCharacter", {
+              current: index + 1,
+              total: CODE_LENGTH,
+            })
+          }
           autoCapitalize="characters"
           autoCorrect={false}
           maxLength={1}

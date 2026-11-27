@@ -44,6 +44,8 @@ import { useConnectionStore } from "../../src/store/connection-store";
 import { getSocketClient } from "../../src/services/socket-client";
 import { emitWithAcknowledgement } from "../../src/services/socket-requests";
 import { useDeviceLocation } from "../../src/hooks/use-device-location";
+import { localizeManhuntError } from "../../src/i18n/manhunt-errors";
+import { useTranslation } from "../../src/i18n/use-translation";
 import { colors, radii, spacing, typography } from "../../src/theme";
 
 function clampRadiusMeters(radiusMeters: number) {
@@ -58,9 +60,14 @@ function clampRadiusMeters(radiusMeters: number) {
 
 export default function SetupRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const playerId = useRoomStore((state) => state.playerId);
   const setRoom = useRoomStore((state) => state.setRoom);
+  const manhuntBoundaryRoomCode = useRoomStore(
+    (state) => state.manhuntBoundaryRoomCode,
+  );
+  const manhuntBoundary = useRoomStore((state) => state.manhuntBoundary);
   const connectionStatus = useConnectionStore((state) => state.status);
   const location = useDeviceLocation();
   const [hunterCount, setHunterCount] = useState(
@@ -71,12 +78,13 @@ export default function SetupRoute() {
   );
   const [radiusMeters, setRadiusMeters] = useState(
     clampRadiusMeters(
-      room?.settings.manhunt?.boundary.radiusMeters ??
-        MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
+      manhuntBoundaryRoomCode === room?.code
+        ? manhuntBoundary?.radiusMeters ?? MIN_MANHUNT_BOUNDARY_RADIUS_METERS
+        : MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
     ),
   );
   const [center, setCenter] = useState(
-    room?.settings.manhunt?.boundary.center ?? null,
+    manhuntBoundaryRoomCode === room?.code ? manhuntBoundary?.center ?? null : null,
   );
   const [ready, setReady] = useState(false);
   const [readyPlayerIds, setReadyPlayerIds] = useState<string[]>([]);
@@ -90,12 +98,17 @@ export default function SetupRoute() {
     setGameDurationSeconds(room.settings.manhunt?.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS);
     setRadiusMeters(
       clampRadiusMeters(
-        room.settings.manhunt?.boundary.radiusMeters ??
-          MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
+        manhuntBoundaryRoomCode === room.code
+          ? manhuntBoundary?.radiusMeters ?? MIN_MANHUNT_BOUNDARY_RADIUS_METERS
+          : MIN_MANHUNT_BOUNDARY_RADIUS_METERS,
       ),
     );
-    setCenter(room.settings.manhunt?.boundary.center ?? null);
-  }, [room?.code, room?.settings.manhunt]);
+    setCenter(
+      manhuntBoundaryRoomCode === room.code
+        ? manhuntBoundary?.center ?? null
+        : null,
+    );
+  }, [room?.code, room?.settings.manhunt, manhuntBoundaryRoomCode, manhuntBoundary]);
 
   useEffect(() => {
     let socket: ReturnType<typeof getSocketClient>;
@@ -104,12 +117,10 @@ export default function SetupRoute() {
     } catch {
       return;
     }
-    const settingsUpdated = (payload: { roomCode: string; settings: ManhuntSettings }) => {
+    const settingsUpdated = (payload: { roomCode: string; settings: import("@impostor/api").ManhuntPublicSettings }) => {
       if (payload.roomCode !== room?.code) return;
       setHunterCount(payload.settings.hunterCount);
       setGameDurationSeconds(payload.settings.gameDurationSeconds ?? DEFAULT_MANHUNT_GAME_DURATION_SECONDS);
-      setRadiusMeters(clampRadiusMeters(payload.settings.boundary.radiusMeters));
-      setCenter(payload.settings.boundary.center);
       setError(null);
     };
     const roomUpdated = (payload: RoomUpdatePayload) => {
@@ -180,51 +191,54 @@ export default function SetupRoute() {
   const locationMessage = (() => {
     switch (location.status) {
       case "loading":
-        return "Checking foreground location permission.";
+        return t("manhunt.setup.location.checking");
       case "requesting-permission":
-        return "Requesting permission to use your location while the app is open.";
+        return t("manhunt.setup.location.requesting");
       case "locating":
-        return "Searching for your GPS location. This can take a little time.";
+        return t("manhunt.setup.location.searching");
       case "ready":
         return currentCoordinates
-          ? "Your current location is available to use as the play-area centre."
-          : "A valid GPS position is not available. Retry location before using it.";
+          ? t("manhunt.setup.location.available")
+          : t("manhunt.setup.location.invalid");
       case "permission-denied":
         return location.permissionCanAskAgain
-          ? "Location permission has not been granted. Allow it to use your current position."
-          : "Location permission is disabled for this app. Enable it in app settings to continue.";
+          ? t("manhunt.setup.location.permission")
+          : t("manhunt.setup.location.permissionSettings");
       case "services-disabled":
-        return "Device Location is turned off. Turn it on in phone settings, then retry.";
+        return t("manhunt.setup.location.servicesDisabled");
       case "unavailable":
-        return location.error ??
-          "Could not get a usable GPS position. Move to a more open area and retry.";
+        return localizeManhuntError(location.error, t) ??
+          t("manhunt.setup.location.unavailable");
       case "error":
         return location.error
-          ? `Location retrieval failed: ${location.error}`
-          : "Location retrieval failed. Check permission and device Location, then retry.";
+          ? t("manhunt.setup.location.retrievalFailedDetail", {
+              detail:
+                localizeManhuntError(location.error, t) ?? location.error,
+            })
+          : t("manhunt.setup.location.retrievalFailed");
     }
   })();
   const locationAction = (() => {
     if (location.status === "permission-denied") {
       return location.permissionCanAskAgain
         ? {
-            title: "Request permission again",
+            title: t("manhunt.setup.location.requestAgain"),
             onPress: location.retry,
           }
         : {
-            title: "Open app settings",
+            title: t("manhunt.setup.location.openSettings"),
             onPress: location.openAppSettings,
           };
     }
     if (isLocationBusy) return null;
     if (location.status === "ready" && currentCoordinates) {
       return {
-        title: "Refresh GPS location",
+        title: t("manhunt.setup.location.refresh"),
         onPress: location.retry,
       };
     }
     return {
-      title: "Retry location",
+      title: t("manhunt.setup.location.retry"),
       onPress: location.retry,
     };
   })();
@@ -240,7 +254,7 @@ export default function SetupRoute() {
   if (!room || !playerId) {
     return (
       <Screen>
-        <Text style={styles.title}>Room unavailable</Text>
+        <Text style={styles.title}>{t("manhunt.mode.unavailable")}</Text>
       </Screen>
     );
   }
@@ -327,26 +341,26 @@ export default function SetupRoute() {
         <View style={styles.header}>
           <IconButton
             icon={ArrowLeft}
-            accessibilityLabel="Back"
+            accessibilityLabel={t("manhunt.common.back")}
             onPress={() => router.back()}
           />
           <TopHudBar
-            leftLabel="Room code"
+            leftLabel={t("common.roomCode")}
             leftValue={room.code}
-            rightLabel="Players"
+            rightLabel={t("common.players")}
             rightValue={`${room.players.length} / ${room.settings.maxPlayers}`}
           />
         </View>
-        <Text style={styles.title}>Manhunt setup</Text>
+        <Text style={styles.title}>{t("manhunt.setup.title")}</Text>
 
         <HudPanel style={styles.panel}>
-          <Text style={styles.sectionTitle}>Hunters</Text>
+          <Text style={styles.sectionTitle}>{t("manhunt.setup.hunters")}</Text>
           <View style={styles.stepper}>
             <Text style={styles.valueText}>{hunterCount}</Text>
             <View style={styles.stepperControls}>
               <IconButton
                 icon={Minus}
-                accessibilityLabel="Decrease hunters"
+                accessibilityLabel={t("manhunt.setup.decreaseHunters")}
                 disabled={!isHost || hunterCount <= MIN_MANHUNT_HUNTERS}
                 onPress={() => {
                   setHunterCount((value) => Math.max(MIN_MANHUNT_HUNTERS, value - 1));
@@ -355,7 +369,7 @@ export default function SetupRoute() {
               />
               <IconButton
                 icon={Plus}
-                accessibilityLabel="Increase hunters"
+                accessibilityLabel={t("manhunt.setup.increaseHunters")}
                 disabled={!isHost || hunterCount >= hunterMaximum}
                 onPress={() => {
                   setHunterCount((value) => Math.min(hunterMaximum, value + 1));
@@ -372,7 +386,9 @@ export default function SetupRoute() {
               <ActivityIndicator color={colors.teal} />
             ) : null}
             <View style={styles.locationStatusText}>
-              <Text style={styles.sectionTitle}>Current location</Text>
+              <Text style={styles.sectionTitle}>
+                {t("manhunt.setup.currentLocation")}
+              </Text>
               <Text accessibilityLiveRegion="polite" style={styles.mutedText}>
                 {locationMessage}
               </Text>
@@ -391,12 +407,16 @@ export default function SetupRoute() {
         </HudPanel>
 
         <HudPanel style={styles.panel}>
-          <Text style={styles.sectionTitle}>Game duration</Text>
+          <Text style={styles.sectionTitle}>
+            {t("manhunt.setup.duration")}
+          </Text>
           <View style={styles.stepperControls}>
             {MANHUNT_GAME_DURATION_OPTIONS_SECONDS.map((duration) => (
               <PrimaryButton
                 key={duration}
-                title={`${duration / 60} minutes`}
+                title={t("manhunt.setup.durationOption", {
+                  minutes: duration / 60,
+                })}
                 variant={gameDurationSeconds === duration ? "green" : "secondary"}
                 disabled={!isHost}
                 onPress={() => setGameDurationSeconds(duration)}
@@ -404,14 +424,18 @@ export default function SetupRoute() {
             ))}
           </View>
           <Text style={styles.mutedText}>
-            The safe zone has two gradual shrink phases, with a 20-second warning before each one.
+            {t("manhunt.setup.durationExplanation")}
           </Text>
         </HudPanel>
 
         <HudPanel style={styles.panel}>
-          <Text style={styles.sectionTitle}>Play area</Text>
+          <Text style={styles.sectionTitle}>{t("manhunt.setup.playArea")}</Text>
           <PrimaryButton
-            title={center ? "Update from my GPS" : "Use my GPS"}
+            title={t(
+              center
+                ? "manhunt.setup.updateGps"
+                : "manhunt.setup.useGps",
+            )}
             variant="secondary"
             leftIcon={LocateFixed}
             disabled={!isHost}
@@ -419,17 +443,24 @@ export default function SetupRoute() {
           />
           {center ? (
             <Text style={styles.mutedText}>
-              Center: {center.latitude.toFixed(5)}, {center.longitude.toFixed(5)}
+              {t("manhunt.setup.center", {
+                latitude: center.latitude.toFixed(5),
+                longitude: center.longitude.toFixed(5),
+              })}
             </Text>
           ) : (
-            <Text style={styles.mutedText}>No boundary center selected.</Text>
+            <Text style={styles.mutedText}>
+              {t("manhunt.setup.noCenter")}
+            </Text>
           )}
-          <Text style={styles.sectionTitle}>Radius: {radiusMeters} m</Text>
+          <Text style={styles.sectionTitle}>
+            {t("manhunt.setup.radius", { radius: radiusMeters })}
+          </Text>
           <View style={styles.stepper}>
             <View style={styles.stepperControls}>
               <IconButton
                 icon={Minus}
-                accessibilityLabel="Decrease radius"
+                accessibilityLabel={t("manhunt.setup.decreaseRadius")}
                 disabled={!isHost || radiusMeters <= MIN_MANHUNT_BOUNDARY_RADIUS_METERS}
                 onPress={() => setRadiusMeters((value) =>
                   Math.max(MIN_MANHUNT_BOUNDARY_RADIUS_METERS, value - 100),
@@ -437,7 +468,7 @@ export default function SetupRoute() {
               />
               <IconButton
                 icon={Plus}
-                accessibilityLabel="Increase radius"
+                accessibilityLabel={t("manhunt.setup.increaseRadius")}
                 disabled={!isHost || radiusMeters >= MAX_MANHUNT_BOUNDARY_RADIUS_METERS}
                 onPress={() => setRadiusMeters((value) =>
                   Math.min(MAX_MANHUNT_BOUNDARY_RADIUS_METERS, value + 100),
@@ -451,7 +482,7 @@ export default function SetupRoute() {
           />
           {isHost ? (
             <PrimaryButton
-              title="Confirm settings"
+              title={t("manhunt.setup.confirmSettings")}
               loading={isSubmitting}
               disabled={!settingsValid}
               onPress={() => void submitSettings()}
@@ -460,44 +491,56 @@ export default function SetupRoute() {
         </HudPanel>
 
         <HudPanel style={styles.panel}>
-          <Text style={styles.sectionTitle}>Players</Text>
+          <Text style={styles.sectionTitle}>{t("manhunt.setup.players")}</Text>
           {room.players.map((player) => (
             <PlayerRow
               key={player.id}
               name={player.nickname}
               chip={
                 room.hostId === player.id
-                  ? { label: "Host", variant: "gold" }
+                  ? { label: t("manhunt.setup.host"), variant: "gold" }
                   : undefined
               }
               status={
                 readyPlayerIds.includes(player.id)
-                  ? "Ready"
-                  : "Not ready"
+                  ? t("manhunt.setup.ready")
+                  : t("manhunt.setup.notReady")
               }
             />
           ))}
         </HudPanel>
 
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {error ? (
+          <Text style={styles.errorText}>
+            {localizeManhuntError(error, t) ?? error}
+          </Text>
+        ) : null}
         <PrimaryButton
-          title={ready ? "Ready" : "Mark ready"}
+          title={
+            ready
+              ? t("manhunt.setup.ready")
+              : t("manhunt.setup.markReady")
+          }
           variant={ready ? "green" : "secondary"}
           onPress={toggleReady}
         />
         {isHost ? (
           <PrimaryButton
-            title="Start Manhunt"
+            title={t("manhunt.setup.start")}
             loading={isStarting}
             disabled={!canStart || isStarting}
             onPress={() => void startGame()}
           />
         ) : (
-          <Text style={styles.mutedText}>Only the host can start the game.</Text>
+          <Text style={styles.mutedText}>
+            {t("manhunt.setup.hostOnlyStart")}
+          </Text>
         )}
         <Text style={styles.mutedText}>
-          Reveals: {MANHUNT_LOCATION_FLASH_INTERVAL_SECONDS}s interval /{" "}
-          {MANHUNT_LOCATION_REVEAL_DURATION_SECONDS}s window
+          {t("manhunt.setup.reveals", {
+            interval: MANHUNT_LOCATION_FLASH_INTERVAL_SECONDS,
+            duration: MANHUNT_LOCATION_REVEAL_DURATION_SECONDS,
+          })}
         </Text>
       </SafeAreaView>
     </Screen>

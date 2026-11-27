@@ -38,6 +38,10 @@ export interface RoomSettings {
   manhunt?: ManhuntSettings;
 }
 
+export type PublicRoomSettings = Omit<RoomSettings, "manhunt"> & {
+  manhunt?: ManhuntPublicSettings;
+};
+
 export interface ClassicImpostorSettings {
   impostorCount: number;
   discussionDurationSeconds: number;
@@ -57,7 +61,7 @@ export interface Room {
   code: RoomCode;
   hostId: PlayerId;
   players: Player[];
-  settings: RoomSettings;
+  settings: PublicRoomSettings;
   gameStatus: GameStatus;
   currentGameId?: GameSessionId;
   createdAt: ISODateString;
@@ -71,6 +75,7 @@ export interface ImpostorGameState {
   roleRevealEndsAt?: ISODateString;
   discussionEndsAt?: ISODateString;
   votingEndsAt?: ISODateString;
+  votingPhaseId?: number;
   votesSubmitted: number;
   eligibleVoters: number;
   eliminatedPlayerIds: PlayerId[];
@@ -91,6 +96,8 @@ export interface ManhuntSettings {
   gameDurationSeconds?: 1_800 | 2_700 | 3_600;
 }
 
+export type ManhuntPublicSettings = Omit<ManhuntSettings, "boundary">;
+
 export interface ManhuntTeamAssignment {
   playerId: PlayerId;
   team: ManhuntTeam;
@@ -98,10 +105,10 @@ export interface ManhuntTeamAssignment {
 
 export interface ManhuntGameState {
   phase: ManhuntPhase;
-  settings: ManhuntSettings;
-  teams: ManhuntTeamAssignment[];
+  settings: ManhuntPublicSettings;
   readyPlayerIds: PlayerId[];
   countdownEndsAt?: ISODateString;
+  runnerHeadStartEndsAt?: ISODateString;
   activeSince?: ISODateString;
   nextLocationFlashAt?: ISODateString;
   gameEndsAt?: ISODateString;

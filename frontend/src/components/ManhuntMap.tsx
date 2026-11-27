@@ -7,10 +7,16 @@ import {
   Map,
   Marker,
 } from "@maplibre/maplibre-react-native";
+import { Target } from "lucide-react-native";
 import type { CameraRef } from "@maplibre/maplibre-react-native";
 import type { LocationObject } from "expo-location";
 import { colors } from "../theme";
-import type { Coordinates, RevealedLocation } from "@impostor/api";
+import type {
+  Coordinates,
+  ManhuntFreezeDecoyPayload,
+  ManhuntLateGameCluePayload,
+  RevealedLocation,
+} from "@impostor/api";
 
 import {
   createBoundaryCircleGeoJson,
@@ -27,7 +33,10 @@ interface ManhuntMapProps {
   onMapReady: () => void;
   onMapError: () => void;
   boundary?: { center: Coordinates; radiusMeters: number } | null;
+  missionCircle?: { center: Coordinates; radiusMeters: number } | null;
   revealedLocations?: RevealedLocation[];
+  decoyLocations?: ManhuntFreezeDecoyPayload[];
+  lateGameClue?: ManhuntLateGameCluePayload | null;
   caughtPlayerIds?: string[];
   selectedPlayerId?: string | null;
   onMarkerPress?: (playerId: string) => void;
@@ -39,7 +48,10 @@ export function ManhuntMap({
   onMapReady,
   onMapError,
   boundary,
+  missionCircle,
   revealedLocations = [],
+  decoyLocations = [],
+  lateGameClue = null,
   caughtPlayerIds = [],
   selectedPlayerId,
   onMarkerPress,
@@ -75,6 +87,20 @@ export function ManhuntMap({
       boundary?.center.latitude,
       boundary?.center.longitude,
       boundary?.radiusMeters,
+    ],
+  );
+  const missionCircleGeoJson = useMemo(
+    () =>
+      missionCircle
+        ? createBoundaryCircleGeoJson(
+            missionCircle.center,
+            missionCircle.radiusMeters,
+          )
+        : null,
+    [
+      missionCircle?.center.latitude,
+      missionCircle?.center.longitude,
+      missionCircle?.radiusMeters,
     ],
   );
   const boundaryBounds = useMemo(
@@ -189,6 +215,41 @@ export function ManhuntMap({
           />
         </GeoJSONSource>
       ) : null}
+      {missionCircle && missionCircleGeoJson ? (
+        <GeoJSONSource id="manhunt-own-mission" data={missionCircleGeoJson}>
+          <Layer
+            id="manhunt-own-mission-fill"
+            type="fill"
+            paint={{
+              "fill-color": colors.gold,
+              "fill-opacity": 0.18,
+            }}
+          />
+          <Layer
+            id="manhunt-own-mission-line"
+            type="line"
+            paint={{
+              "line-color": colors.gold,
+              "line-width": 3,
+              "line-opacity": 0.96,
+            }}
+          />
+        </GeoJSONSource>
+      ) : null}
+      {missionCircle ? (
+        <Marker
+          id="manhunt-own-mission-center"
+          lngLat={[
+            missionCircle.center.longitude,
+            missionCircle.center.latitude,
+          ]}
+          anchor="center"
+        >
+          <View style={styles.missionMarker}>
+            <Target color={colors.textOnAccent} size={19} strokeWidth={2.5} />
+          </View>
+        </Marker>
+      ) : null}
       {location ? (
         <Marker
           id="device-location"
@@ -218,9 +279,6 @@ export function ManhuntMap({
             <View
               style={[
                 styles.remoteMarker,
-                revealed.team === "hunter"
-                  ? styles.hunterMarker
-                  : styles.runnerMarker,
                 caught ? styles.caughtMarker : null,
                 selected ? styles.selectedMarker : null,
               ]}
@@ -230,6 +288,36 @@ export function ManhuntMap({
           </Marker>
         );
       })}
+      {decoyLocations.map((decoy) => (
+        <Marker
+          key={decoy.decoyId}
+          id={`freeze-decoy-${decoy.decoyId}`}
+          lngLat={[
+            decoy.coordinates.longitude,
+            decoy.coordinates.latitude,
+          ]}
+          anchor="center"
+        >
+          <View style={styles.remoteMarker}>
+            <View style={styles.remoteMarkerDot} />
+          </View>
+        </Marker>
+      ))}
+      {lateGameClue ? (
+        <Marker
+          key={lateGameClue.clueId}
+          id={`late-game-clue-${lateGameClue.clueId}`}
+          lngLat={[
+            lateGameClue.coordinates.longitude,
+            lateGameClue.coordinates.latitude,
+          ]}
+          anchor="center"
+        >
+          <View style={styles.remoteMarker}>
+            <View style={styles.remoteMarkerDot} />
+          </View>
+        </Marker>
+      ) : null}
     </Map>
   );
 }
@@ -253,6 +341,16 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: colors.textOnAccent,
   },
+  missionMarker: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 17,
+    backgroundColor: colors.gold,
+    borderWidth: 2,
+    borderColor: colors.textOnAccent,
+  },
   remoteMarker: {
     width: 38,
     height: 38,
@@ -260,14 +358,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 19,
     borderWidth: 2,
-  },
-  hunterMarker: {
-    backgroundColor: "rgba(232, 54, 93, 0.92)",
-    borderColor: colors.recenterRed,
-  },
-  runnerMarker: {
-    backgroundColor: "rgba(61, 220, 151, 0.92)",
-    borderColor: colors.green,
+    backgroundColor: "rgba(83, 96, 116, 0.92)",
+    borderColor: colors.textMuted,
   },
   remoteMarkerDot: {
     width: 12,

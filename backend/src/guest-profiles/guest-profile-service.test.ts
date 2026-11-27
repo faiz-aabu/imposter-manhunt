@@ -19,6 +19,7 @@ const TEST_CONFIG: BackendConfig = {
     url: "https://supabase.example",
     serviceRoleKey: TEST_SERVICE_ROLE_KEY,
   },
+  lateGameExposureDurations: null,
 };
 
 const TEST_PROFILE = {

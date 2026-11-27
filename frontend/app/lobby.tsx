@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   StyleSheet,
@@ -31,6 +31,10 @@ import { getReconnectSession } from "../src/services/player-session";
 import { getPublicRoom } from "../src/services/room-rest";
 import { emitWithAcknowledgement } from "../src/services/socket-requests";
 import { getSocketClient } from "../src/services/socket-client";
+import { useTranslation } from "../src/i18n/use-translation";
+import { localizeSharedError } from "../src/i18n/shared-errors";
+import { languageOptions, translations } from "../src/i18n/locales";
+import type { TranslationKey } from "../src/i18n/locales";
 import { useConnectionStore } from "../src/store/connection-store";
 import { useRoomStore } from "../src/store/room-store";
 import { colors, spacing, typography } from "../src/theme";
@@ -46,11 +50,16 @@ const PLAYER_COLORS = [
 
 export default function LobbyRoute() {
   const router = useRouter();
+  const t = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const room = useRoomStore((state) => state.room);
   const roomCode = room?.code;
   const playerId = useRoomStore((state) => state.playerId);
   const notice = useRoomStore((state) => state.notice);
   const activity = useRoomStore((state) => state.activity);
+  const localizedActivity = localizeActivity(activity, t);
+  const localizedNotice = localizeNotice(notice, t);
   const setSession = useRoomStore((state) => state.setSession);
   const setRoom = useRoomStore((state) => state.setRoom);
   const setActivity = useRoomStore((state) => state.setActivity);
@@ -59,6 +68,7 @@ export default function LobbyRoute() {
   const [isRestoring, setIsRestoring] = useState(!room || !playerId);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [lobbyError, setLobbyError] = useState<string | null>(null);
+  const localizedLobbyError = localizeSharedError(lobbyError, t);
 
   useEffect(() => {
     if (room && playerId) {
@@ -93,8 +103,14 @@ export default function LobbyRoute() {
         if (active) {
           setRestoreError(
             error instanceof Error
-              ? error.message
-              : "Could not restore the room session.",
+              ? translationRef.current("lobby.restoreReason", {
+                  message:
+                    localizeSharedError(
+                      error.message,
+                      translationRef.current,
+                    ) ?? error.message,
+                })
+              : translationRef.current("lobby.restoreError"),
           );
         }
       } finally {
@@ -126,7 +142,7 @@ export default function LobbyRoute() {
       setLobbyError(
         error instanceof Error
           ? error.message
-          : "Could not connect to the room server.",
+          : translationRef.current("lobby.connectError"),
       );
       return;
     }
@@ -139,7 +155,11 @@ export default function LobbyRoute() {
     };
     const playerJoined = (payload: PlayerJoinedPayload) => {
       if (payload.roomCode === roomCode) {
-        setActivity(`${payload.player.nickname} joined the room.`);
+        setActivity(
+          translationRef.current("lobby.joinedActivity", {
+            name: payload.player.nickname,
+          }),
+        );
       }
     };
     const playerLeft = (payload: PlayerLeftPayload) => {
@@ -149,8 +169,10 @@ export default function LobbyRoute() {
       const previousRoom = useRoomStore.getState().room;
       const playerName =
         previousRoom?.players.find((player) => player.id === payload.playerId)
-          ?.nickname ?? "A player";
-      setActivity(`${playerName} left the room.`);
+          ?.nickname ?? translationRef.current("lobby.playerFallback");
+      setActivity(
+        translationRef.current("lobby.leftActivity", { name: playerName }),
+      );
     };
     const serverError = (payload: ServerErrorPayload) => {
       setLobbyError(payload.message);
@@ -166,7 +188,9 @@ export default function LobbyRoute() {
           reconnectSession.roomCode !== roomCode ||
           reconnectSession.playerId !== playerId
         ) {
-          throw new Error("The saved room session is no longer available.");
+          throw new Error(
+            translationRef.current("lobby.sessionUnavailable"),
+          );
         }
 
         const response = await emitWithAcknowledgement({
@@ -187,7 +211,7 @@ export default function LobbyRoute() {
           setLobbyError(
             error instanceof Error
               ? error.message
-              : "Could not restore the room connection.",
+              : translationRef.current("lobby.connectionRestoreError"),
           );
         }
       }
@@ -227,7 +251,7 @@ export default function LobbyRoute() {
       <Screen>
         <View style={styles.statusScreen}>
           <ActivityIndicator color={colors.teal} />
-          <Text style={styles.statusTitle}>Restoring your room...</Text>
+          <Text style={styles.statusTitle}>{t("lobby.restoring")}</Text>
         </View>
       </Screen>
     );
@@ -237,12 +261,12 @@ export default function LobbyRoute() {
     return (
       <Screen>
         <View style={styles.statusScreen}>
-          <Text style={styles.statusTitle}>Room unavailable</Text>
+          <Text style={styles.statusTitle}>{t("lobby.unavailable")}</Text>
           <Text style={styles.mutedText}>
-            {restoreError ?? "No active room session was found."}
+            {localizeSharedError(restoreError, t) ?? t("lobby.noSession")}
           </Text>
           <PrimaryButton
-            title="Back to home"
+            title={t("lobby.backHome")}
             variant="secondary"
             onPress={() => router.replace("/")}
           />
@@ -255,19 +279,19 @@ export default function LobbyRoute() {
   const players = room.players;
   const connectionMessage =
     connectionStatus === "connected"
-      ? "Connected to the room"
+      ? t("lobby.connection.connected")
       : connectionStatus === "reconnecting"
-        ? "Reconnecting to the room..."
+        ? t("lobby.connection.reconnecting")
         : connectionStatus === "connecting"
-          ? "Connecting to the room..."
-          : "Connection lost. Trying to reconnect...";
+          ? t("lobby.connection.connecting")
+          : t("lobby.connection.lost");
 
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Players"
+        rightLabel={t("common.players")}
         rightValue={`${players.length} / ${room.settings.maxPlayers}`}
         leftValueStyle={typography.roomCode}
         style={styles.topBar}
@@ -275,7 +299,10 @@ export default function LobbyRoute() {
 
       <View style={styles.summaryRow}>
         <Chip
-          label={`${players.length} / ${room.settings.maxPlayers} players`}
+          label={t("lobby.playerCount", {
+            players: players.length,
+            maximum: room.settings.maxPlayers,
+          })}
           variant="muted"
         />
         <Text
@@ -290,11 +317,22 @@ export default function LobbyRoute() {
         </Text>
       </View>
 
+      <PrimaryButton
+        title={t("lobby.howToPlay")}
+        variant="secondary"
+        onPress={() =>
+          router.push({
+            pathname: "/tutorial",
+            params: { returnTo: "/lobby" },
+          })
+        }
+      />
+
       {notice ? (
         <HudPanel style={styles.noticePanel}>
-          <Text style={styles.mutedText}>{notice}</Text>
+          <Text style={styles.mutedText}>{localizedNotice}</Text>
           <PrimaryButton
-            title="Dismiss"
+            title={t("lobby.dismiss")}
             variant="secondary"
             onPress={() => setNotice(null)}
             style={styles.dismissButton}
@@ -302,22 +340,25 @@ export default function LobbyRoute() {
         </HudPanel>
       ) : null}
 
-      {activity ? (
+      {localizedActivity ? (
         <Text accessibilityLiveRegion="polite" style={styles.activity}>
-          {activity}
+          {localizedActivity}
         </Text>
       ) : null}
-      {lobbyError ? (
+      {localizedLobbyError ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {lobbyError}
+          {localizedLobbyError}
         </Text>
       ) : null}
 
       <HudPanel style={styles.playersPanel}>
         <View style={styles.panelHeading}>
-          <Text style={styles.sectionTitle}>Players</Text>
+          <Text style={styles.sectionTitle}>{t("lobby.players")}</Text>
           <Chip
-            label={`${players.length} / ${room.settings.maxPlayers}`}
+            label={t("lobby.playerCount", {
+              players: players.length,
+              maximum: room.settings.maxPlayers,
+            })}
             variant="teal"
           />
         </View>
@@ -333,15 +374,15 @@ export default function LobbyRoute() {
                 avatarColor={PLAYER_COLORS[index % PLAYER_COLORS.length]}
                 chip={
                   isPlayerHost
-                    ? { label: "Host", variant: "gold" }
+                    ? { label: t("lobby.host"), variant: "gold" }
                     : undefined
                 }
                 status={
                   isPlayerHost
                     ? undefined
                     : playerIsConnected
-                      ? "Ready"
-                      : "Joining"
+                      ? t("lobby.ready")
+                      : t("lobby.joining")
                 }
               />
             );
@@ -350,29 +391,81 @@ export default function LobbyRoute() {
       </HudPanel>
 
       <View style={styles.gameSection}>
-        <Text style={styles.sectionTitle}>Pick a game</Text>
+        <Text style={styles.sectionTitle}>{t("lobby.pickGame")}</Text>
         {isHost ? (
           <>
             <Text style={styles.mutedText}>
-              Choose a game for everyone in the room.
+              {t("lobby.chooseGameDescription")}
             </Text>
             <PrimaryButton
-              title="Choose a game"
+              title={t("lobby.chooseGame")}
               onPress={() => router.push("/games")}
               style={styles.primaryAction}
             />
           </>
         ) : (
           <HudPanel style={styles.waitingPanel}>
-            <Text style={styles.waitingTitle}>Waiting for the host</Text>
+            <Text style={styles.waitingTitle}>{t("lobby.waitingTitle")}</Text>
             <Text style={styles.mutedText}>
-              The host will choose which game to play.
+              {t("lobby.waitingDescription")}
             </Text>
           </HudPanel>
         )}
       </View>
     </Screen>
   );
+}
+
+function localizeActivity(
+  activity: string | null,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string,
+): string | null {
+  if (!activity) {
+    return null;
+  }
+
+  for (const { code } of languageOptions) {
+    for (const key of ["lobby.joinedActivity", "lobby.leftActivity"] as const) {
+      const template = translations[code][key];
+      const placeholderIndex = template.indexOf("{name}");
+      if (placeholderIndex < 0) {
+        continue;
+      }
+      const prefix = template.slice(0, placeholderIndex);
+      const suffix = template.slice(placeholderIndex + "{name}".length);
+      if (activity.startsWith(prefix) && activity.endsWith(suffix)) {
+        const name = activity.slice(
+          prefix.length,
+          activity.length - suffix.length,
+        );
+        return t(key, { name });
+      }
+    }
+  }
+
+  return activity;
+}
+
+function localizeNotice(
+  notice: string | null,
+  t: (key: TranslationKey) => string,
+): string | null {
+  if (!notice) {
+    return null;
+  }
+
+  for (const { code } of languageOptions) {
+    for (const key of [
+      "lobby.sessionSaveNotice",
+      "lobby.hostReturnedNotice",
+    ] as const) {
+      if (notice === translations[code][key]) {
+        return t(key);
+      }
+    }
+  }
+
+  return notice;
 }
 
 const styles = StyleSheet.create({

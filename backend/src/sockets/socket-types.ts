@@ -1,4 +1,5 @@
 import {
+  CLOCK_EVENTS,
   CONNECTION_EVENTS,
   GAME_EVENTS,
   IMPOSTOR_EVENTS,
@@ -8,6 +9,7 @@ import {
 } from "@impostor/api";
 import type {
   ClientToServerPayloads,
+  ClockSyncResponsePayload,
   CreateRoomResponse,
   JoinRoomResponse,
   PlayerId,
@@ -28,6 +30,10 @@ export type SocketAcknowledgement<T> =
 export type SocketAck<T> = (result: SocketAcknowledgement<T>) => void;
 
 export interface ClientToServerEvents {
+  [CLOCK_EVENTS.SYNC]: (
+    payload: ClientToServerPayloads[typeof CLOCK_EVENTS.SYNC],
+    acknowledgement?: SocketAck<ClockSyncResponsePayload>,
+  ) => void;
   [ROOM_EVENTS.CREATE]: (
     payload: ClientToServerPayloads[typeof ROOM_EVENTS.CREATE],
     acknowledgement?: SocketAck<CreateRoomResponse>,
@@ -42,6 +48,10 @@ export interface ClientToServerEvents {
   ) => void;
   [ROOM_EVENTS.UPDATE_SETTINGS]: (
     payload: ClientToServerPayloads[typeof ROOM_EVENTS.UPDATE_SETTINGS],
+    acknowledgement?: SocketAck<RoomUpdatePayload>,
+  ) => void;
+  [ROOM_EVENTS.RETURN_TO_LOBBY]: (
+    payload: ClientToServerPayloads[typeof ROOM_EVENTS.RETURN_TO_LOBBY],
     acknowledgement?: SocketAck<RoomUpdatePayload>,
   ) => void;
   [CONNECTION_EVENTS.RECONNECT]: (
@@ -71,6 +81,26 @@ export interface ClientToServerEvents {
   [MANHUNT_EVENTS.LOCATION_UPDATE]: (
     payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.LOCATION_UPDATE],
     acknowledgement?: SocketAck<ManhuntLocationAcknowledgementPayload>,
+  ) => void;
+  [MANHUNT_EVENTS.FREEZE]: (
+    payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.FREEZE],
+    acknowledgement?: SocketAck<void>,
+  ) => void;
+  [MANHUNT_EVENTS.FOOTSTEPS]: (
+    payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.FOOTSTEPS],
+    acknowledgement?: SocketAck<void>,
+  ) => void;
+  [MANHUNT_EVENTS.SMOKE_BOMB]: (
+    payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.SMOKE_BOMB],
+    acknowledgement?: SocketAck<void>,
+  ) => void;
+  [MANHUNT_EVENTS.GHOST]: (
+    payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.GHOST],
+    acknowledgement?: SocketAck<void>,
+  ) => void;
+  [MANHUNT_EVENTS.FREEZE_DECOY]: (
+    payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.FREEZE_DECOY],
+    acknowledgement?: SocketAck<void>,
   ) => void;
   [MANHUNT_EVENTS.READY_UPDATE]: (
     payload: ClientToServerPayloads[typeof MANHUNT_EVENTS.READY_UPDATE],

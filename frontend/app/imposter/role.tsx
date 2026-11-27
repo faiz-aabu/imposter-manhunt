@@ -21,12 +21,15 @@ import { useClassicGameStore } from "../../src/store/classic-game-store";
 import { useWordGameStore } from "../../src/store/word-game-store";
 import { useConnectionStore } from "../../src/store/connection-store";
 import { useRoomStore } from "../../src/store/room-store";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { localizeImpostorError } from "../../src/i18n/impostor-errors";
 import { colors, radii, spacing, typography } from "../../src/theme";
 
 const ROLE_REQUEST_TIMEOUT_MS = 10_000;
 
 export default function ImpostorRoleRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const playerId = useRoomStore((state) => state.playerId);
   const connectionStatus = useConnectionStore((state) => state.status);
@@ -140,12 +143,12 @@ export default function ImpostorRoleRoute() {
     return (
       <Screen>
         <View style={styles.centered}>
-          <Text style={styles.title}>Waiting for game state</Text>
+          <Text style={styles.title}>{t("impostor.role.waitingTitle")}</Text>
           <Text style={styles.mutedText}>
-            The server has not provided an active Impostor game session.
+            {t("impostor.role.waitingDescription")}
           </Text>
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -158,12 +161,14 @@ export default function ImpostorRoleRoute() {
     return (
       <Screen>
         <View style={styles.centered}>
-          <Text style={styles.title}>Room session mismatch</Text>
+          <Text style={styles.title}>
+            {t("impostor.role.sessionMismatchTitle")}
+          </Text>
           <Text style={styles.mutedText}>
-            Return to the lobby and restore the correct room session.
+            {t("impostor.role.sessionMismatchDescription")}
           </Text>
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -175,7 +180,11 @@ export default function ImpostorRoleRoute() {
   const phaseAllowsContinue =
     gameState.phase !== "role_reveal" && role !== null;
   const roleTitle =
-    role?.role === "impostor" ? "Impostor" : role ? "Civilian" : null;
+    role?.role === "impostor"
+      ? t("impostor.role.impostor")
+      : role
+        ? t("impostor.role.civilian")
+        : null;
   const privateWord =
     isWordSession && role?.role === "civilian" ? role.secretWord : null;
   const canRevealRole =
@@ -198,21 +207,27 @@ export default function ImpostorRoleRoute() {
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Round"
+        rightLabel={t("common.round")}
         rightValue={`${gameState.roundNumber}`}
       />
 
       <View style={styles.heading}>
-        <Chip label="Private role" variant="gold" />
+        <Chip label={t("impostor.role.privateChip")} variant="gold" />
         <Text style={styles.title}>
-          {isWordSession ? "Your word and role" : "Your secret role"}
+          {t(
+            isWordSession
+              ? "impostor.role.wordTitle"
+              : "impostor.role.secretTitle",
+          )}
         </Text>
         <Text style={styles.mutedText}>
-          {isWordSession
-            ? "Keep your word and role private. Only your player receives them."
-            : "Keep your role to yourself. Your screen is the only one receiving it."}
+          {t(
+            isWordSession
+              ? "impostor.role.wordPrivacy"
+              : "impostor.role.rolePrivacy",
+          )}
         </Text>
       </View>
 
@@ -232,8 +247,8 @@ export default function ImpostorRoleRoute() {
             accessibilityRole="button"
             accessibilityLabel={
               isRevealed
-                ? "Your private role is revealed"
-                : "Press and hold to reveal your role and word"
+                ? t("impostor.role.revealedAccessibility")
+                : t("impostor.role.revealAccessibility")
             }
             onPressIn={() => setIsRevealed(true)}
             onPressOut={() => setIsRevealed(false)}
@@ -263,7 +278,9 @@ export default function ImpostorRoleRoute() {
             ) : (
               <>
                 <EyeOff color={colors.textMuted} size={22} />
-                <Text style={styles.hiddenRole}>Press and hold to reveal</Text>
+                <Text style={styles.hiddenRole}>
+                  {t("impostor.role.holdToReveal")}
+                </Text>
               </>
             )}
           </Pressable>
@@ -284,19 +301,19 @@ export default function ImpostorRoleRoute() {
           <View style={styles.loadingRole}>
             <Text style={styles.hiddenRole}>
               {roleLoading
-                ? "Requesting your private role..."
+                ? t("impostor.role.requesting")
                 : connectionStatus === "reconnecting"
-                  ? "Reconnecting to restore your role..."
-                  : "Waiting for your private role..."}
+                  ? t("impostor.role.reconnecting")
+                  : t("impostor.role.waiting")}
             </Text>
             {error ? (
               <Text accessibilityRole="alert" style={styles.error}>
-                {error}
+                {localizeImpostorError(error, t)}
               </Text>
             ) : null}
             {connectionStatus === "connected" && !roleLoading ? (
               <PrimaryButton
-                title="Request my role"
+                title={t("impostor.role.request")}
                 variant="secondary"
                 onPress={requestRole}
                 style={styles.requestButton}
@@ -308,17 +325,21 @@ export default function ImpostorRoleRoute() {
 
       {gameState.phase === "role_reveal" ? (
         <HudPanel style={styles.timerPanel}>
-          <Text style={styles.timerLabel}>Role reveal ends in</Text>
+          <Text style={styles.timerLabel}>
+            {t("impostor.role.revealEnds")}
+          </Text>
           <Text style={styles.timer}>{countdown.label}</Text>
           <Text style={styles.mutedText}>
-            The server will open discussion when its timer expires.
+            {t("impostor.role.timerDescription")}
           </Text>
         </HudPanel>
       ) : (
         <HudPanel style={styles.timerPanel}>
-          <Text style={styles.timerLabel}>The server is ready</Text>
+          <Text style={styles.timerLabel}>
+            {t("impostor.role.serverReady")}
+          </Text>
           <Text style={styles.mutedText}>
-            Continue when you are ready. Game timing is controlled by the server.
+            {t("impostor.role.serverReadyDescription")}
           </Text>
         </HudPanel>
       )}
@@ -326,21 +347,21 @@ export default function ImpostorRoleRoute() {
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting to the game..."
-            : "Connection lost. Waiting to reconnect..."}
+            ? t("impostor.role.reconnectingGame")
+            : t("impostor.role.connectionLost")}
         </Text>
       ) : null}
       {error && role ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(error, t)}
         </Text>
       ) : null}
 
       <PrimaryButton
         title={
           gameState.phase === "role_reveal"
-            ? "Waiting for the server"
-            : "Continue"
+            ? t("impostor.role.waitingForServer")
+            : t("impostor.role.continue")
         }
         leftIcon={ArrowRight}
         disabled={!phaseAllowsContinue}

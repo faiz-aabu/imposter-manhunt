@@ -26,7 +26,7 @@ interface ClassicGameState {
   result: GameEndedPayload["result"] | null;
   reveal: ImpostorRevealPayload | null;
   playersAtStart: Player[];
-  serverTimeOffsetMs: number;
+  serverTimeOffsetMs: number | null;
   roleLoading: boolean;
   roleRequestSessionId: string | null;
   selectedTargetId: PlayerId | null;
@@ -37,6 +37,7 @@ interface ClassicGameState {
   setSession: (session: ClassicGameSession, players: Player[]) => void;
   setPlayersAtStart: (players: Player[]) => void;
   setGameState: (payload: GameStateUpdatePayload) => void;
+  setServerTimeOffset: (offsetMs: number | null) => void;
   setRole: (payload: ImpostorRoleAssignmentPayload) => void;
   setDiscussion: (payload: DiscussionPayload) => void;
   setVoteResults: (payload: VoteResultsPayload) => void;
@@ -59,7 +60,7 @@ const initialState = {
   result: null,
   reveal: null,
   playersAtStart: [],
-  serverTimeOffsetMs: 0,
+  serverTimeOffsetMs: null,
   roleLoading: false,
   roleRequestSessionId: null,
   selectedTargetId: null,
@@ -72,6 +73,7 @@ const initialState = {
   | "setSession"
   | "setPlayersAtStart"
   | "setGameState"
+  | "setServerTimeOffset"
   | "setRole"
   | "setDiscussion"
   | "setVoteResults"
@@ -90,6 +92,11 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
   setSession: (session, players) =>
     set((current) => {
       if (current.session?.id === session.id) {
+        const currentVoteKey =
+          session.state.phase === "voting"
+            ? makeVoteKey(session.id, session.state)
+            : null;
+        const votePhaseChanged = currentVoteKey !== current.currentVoteKey;
         return {
           session,
           state: session.state,
@@ -97,6 +104,14 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
             current.playersAtStart.length > 0
               ? current.playersAtStart
               : [...players],
+          ...(votePhaseChanged
+            ? {
+                currentVoteKey,
+                selectedTargetId: null,
+                submittedVoteKey: null,
+                voteSent: false,
+              }
+            : {}),
         };
       }
 
@@ -105,7 +120,11 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
         session,
         state: session.state,
         playersAtStart: [...players],
-        serverTimeOffsetMs: Date.parse(session.startedAt) - Date.now(),
+        serverTimeOffsetMs: current.serverTimeOffsetMs,
+        currentVoteKey:
+          session.state.phase === "voting"
+            ? makeVoteKey(session.id, session.state)
+            : null,
       };
     }),
   setPlayersAtStart: (players) =>
@@ -148,8 +167,6 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
                 ? "finished"
                 : "in_progress",
         },
-        serverTimeOffsetMs:
-          new Date(payload.updatedAt).getTime() - Date.now(),
         ...(roundChanged ? { voteResults: null } : {}),
         ...(votePhaseChanged
           ? {
@@ -161,6 +178,7 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
           : {}),
       };
     }),
+  setServerTimeOffset: (serverTimeOffsetMs) => set({ serverTimeOffsetMs }),
   setRole: (payload) =>
     set((current) =>
       current.session?.id === payload.sessionId
@@ -177,8 +195,6 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
       current.session?.id === payload.sessionId
         ? {
             discussion: payload,
-            serverTimeOffsetMs:
-              Date.parse(payload.startsAt) - Date.now(),
           }
         : {},
     ),
@@ -268,19 +284,33 @@ export const useClassicGameStore = create<ClassicGameState>((set, get) => ({
         : {}),
     })),
   clearError: () => set({ error: null }),
-  reset: () => set(initialState),
+  reset: () =>
+    set((current) => ({
+      ...initialState,
+      serverTimeOffsetMs: current.serverTimeOffsetMs,
+    })),
 }));
 
 export function getCurrentVoteKey(
   sessionId: string,
   state: ImpostorGameState,
-): string {
+): string | null {
   return makeVoteKey(sessionId, state);
 }
 
-function makeVoteKey(sessionId: string, state: ImpostorGameState): string {
+function makeVoteKey(
+  sessionId: string,
+  state: ImpostorGameState,
+): string | null {
+  if (
+    !Number.isInteger(state.votingPhaseId) ||
+    (state.votingPhaseId ?? 0) <= 0
+  ) {
+    return null;
+  }
+
   const candidates = state.revotePlayerIds
     ? [...state.revotePlayerIds].sort().join(",")
     : "all";
-  return `${sessionId}:${state.roundNumber}:${candidates}`;
+  return `${sessionId}:${state.roundNumber}:${state.votingPhaseId}:${candidates}`;
 }

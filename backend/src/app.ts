@@ -33,10 +33,45 @@ const GUEST_PROFILE_CREATE_LIMIT = 5;
 const GUEST_PROFILE_RESTORE_LIMIT = 12;
 const GUEST_PROFILE_LINK_LIMIT = 10;
 
+export interface BackendReadinessResponse {
+  readonly processAlive: true;
+  readonly acceptingTraffic: boolean;
+  readonly durableRuntimeReadiness: string;
+  readonly durableRuntimeInitialized: boolean;
+  readonly databaseLeaseOwned: boolean | null;
+  readonly waitingRoomRecoveryCompleted: boolean;
+  readonly shuttingDown: boolean;
+  readonly unresolved: {
+    readonly trackedReconciliations: number;
+    readonly exhaustedReconciliations: number;
+    readonly pendingExpirations: number;
+    readonly pendingExpirationCleanup: number;
+    readonly scheduledReconnectTimeouts: number;
+    readonly pendingTimeoutSideEffects: number;
+  };
+}
+
 export function createApp(
   config: BackendConfig,
   rooms: RoomService,
   guestProfiles = new GuestProfileService(config.guestProfiles),
+  getReadiness: () => BackendReadinessResponse = () => ({
+    processAlive: true,
+    acceptingTraffic: true,
+    durableRuntimeReadiness: "disabled",
+    durableRuntimeInitialized: false,
+    databaseLeaseOwned: null,
+    waitingRoomRecoveryCompleted: false,
+    shuttingDown: false,
+    unresolved: {
+      trackedReconciliations: 0,
+      exhaustedReconciliations: 0,
+      pendingExpirations: 0,
+      pendingExpirationCleanup: 0,
+      scheduledReconnectTimeouts: 0,
+      pendingTimeoutSideEffects: 0,
+    },
+  }),
 ): express.Express {
   const app = express();
   const guestProfileRateLimiter = new InMemoryRateLimiter();
@@ -55,6 +90,13 @@ export function createApp(
       status: "ok",
       timestamp: new Date().toISOString(),
     });
+  });
+
+  app.get("/ready", (_request, response) => {
+    const readiness = getReadiness();
+    response
+      .status(readiness.acceptingTraffic ? 200 : 503)
+      .json(readiness);
   });
 
   app.post(

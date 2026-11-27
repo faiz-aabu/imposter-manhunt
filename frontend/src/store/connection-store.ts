@@ -8,14 +8,18 @@ export type ConnectionStatus =
   | "disconnected"
   | "error";
 
+export type ServerClockStatus = "idle" | "syncing" | "ready" | "failed";
+
 export interface ConnectionState {
   isConnected: boolean;
   isConnecting: boolean;
   isReconnecting: boolean;
   latestConnectionError: string | null;
+  serverClockStatus: ServerClockStatus;
   status: ConnectionStatus;
   setStatus: (status: ConnectionStatus) => void;
   setLatestConnectionError: (message: string | null) => void;
+  setServerClockStatus: (status: ServerClockStatus) => void;
 }
 
 export const useConnectionStore = create<ConnectionState>((set) => ({
@@ -23,6 +27,7 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
   isConnecting: false,
   isReconnecting: false,
   latestConnectionError: null,
+  serverClockStatus: "idle",
   status: "idle",
   setStatus: (status) =>
     set({
@@ -33,4 +38,5 @@ export const useConnectionStore = create<ConnectionState>((set) => ({
     }),
   setLatestConnectionError: (latestConnectionError) =>
     set({ latestConnectionError }),
+  setServerClockStatus: (serverClockStatus) => set({ serverClockStatus }),
 }));

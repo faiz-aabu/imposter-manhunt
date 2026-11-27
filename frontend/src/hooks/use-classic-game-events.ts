@@ -29,19 +29,31 @@ import type {
   WordImpostorRoleAssignmentPayload,
   WordImpostorVoteResultsPayload,
   LocationFlashPayload,
-  ManhuntTeamAssignmentPayload,
   PlayerCaughtPayload,
   CountdownPayload,
   ManhuntCountdownCancelledPayload,
 } from "@impostor/api";
 import { getReconnectSession } from "../services/player-session";
+import {
+  requestServerClock,
+  ServerClockSynchronizer,
+} from "../services/server-clock-sync";
 import { getPublicRoom } from "../services/room-rest";
+import { isNonHostImpostorRematchUpdate } from "../services/impostor-rematch";
 import { emitWithAcknowledgement } from "../services/socket-requests";
 import { getSocketClient } from "../services/socket-client";
 import { useClassicGameStore } from "../store/classic-game-store";
 import { useWordGameStore } from "../store/word-game-store";
 import { useRoomStore } from "../store/room-store";
 import { useManhuntGameStore } from "../store/manhunt-game-store";
+import { useConnectionStore } from "../store/connection-store";
+import { resetImpostorGameStores } from "../store/reset-impostor-game-stores";
+import {
+  registerGameReconnectListener,
+  registerManhuntGameEventListeners,
+} from "./manhunt-game-event-listeners";
+import { getManhuntRoleRoute } from "../utils/manhunt-role-countdown";
+import { subscribeToManhuntMissionEvents } from "../services/manhunt-mission-events";
 
 type ImpostorGameSession = Extract<
   GameSession,
@@ -54,6 +66,8 @@ const ROUTE_BY_PHASE = {
   voting: "/imposter/vote",
   reveal: "/imposter/reveal",
 } as const;
+const CLOCK_SYNC_ERROR =
+  "Could not synchronize the server clock. Countdown timing is unavailable.";
 
 export function useClassicGameEvents(): void {
   const router = useRouter();
@@ -82,6 +96,47 @@ export function useClassicGameEvents(): void {
     let countdownSyncInFlight = false;
     let countdownSyncTimer: ReturnType<typeof setTimeout> | undefined;
     let pendingCountdownSync: CountdownPayload | null = null;
+    let huntStartedTimer: ReturnType<typeof setTimeout> | undefined;
+    const clockSynchronizer = new ServerClockSynchronizer(
+      (offsetMs) => {
+        useClassicGameStore.getState().setServerTimeOffset(offsetMs);
+        useWordGameStore.getState().setServerTimeOffset(offsetMs);
+        if (
+          offsetMs !== null &&
+          useConnectionStore.getState().latestConnectionError ===
+            CLOCK_SYNC_ERROR
+        ) {
+          useConnectionStore.getState().setLatestConnectionError(null);
+        }
+      },
+      () => {
+        const connection = useConnectionStore.getState();
+        if (!connection.latestConnectionError) {
+          connection.setLatestConnectionError(CLOCK_SYNC_ERROR);
+        }
+      },
+      (status) => {
+        useConnectionStore.getState().setServerClockStatus(status);
+      },
+    );
+    const synchronizeServerClock = () => {
+      if (socket.connected) {
+        void clockSynchronizer.synchronize((requestId, signal) =>
+          requestServerClock(socket, requestId, signal),
+        );
+      }
+    };
+
+    const announceHuntStarted = () => {
+      if (huntStartedTimer) {
+        clearTimeout(huntStartedTimer);
+      }
+      useManhuntGameStore.getState().setHuntStartedAnnouncement(true);
+      huntStartedTimer = setTimeout(() => {
+        useManhuntGameStore.getState().setHuntStartedAnnouncement(false);
+        huntStartedTimer = undefined;
+      }, 5_000);
+    };
 
     const navigateToState = (
       session: ImpostorGameSession,
@@ -138,7 +193,9 @@ export function useClassicGameEvents(): void {
           if (
             response.data.roomCode !== payload.roomCode ||
             response.data.sessionId !== payload.sessionId ||
-            response.data.endsAt !== payload.endsAt
+            response.data.endsAt !== payload.endsAt ||
+            response.data.runnerHeadStartEndsAt !==
+              payload.runnerHeadStartEndsAt
           ) {
             return;
           }
@@ -173,35 +230,55 @@ export function useClassicGameEvents(): void {
         });
     };
 
+    let missionEvents:
+      | ReturnType<typeof subscribeToManhuntMissionEvents>
+      | undefined;
+    const syncMissionSubscription = () => {
+      const current = useManhuntGameStore.getState();
+      if (
+        current.session &&
+        current.gameState?.phase !== "finished" &&
+        !current.result
+      ) {
+        missionEvents ??= subscribeToManhuntMissionEvents(socket);
+      } else {
+        missionEvents?.dispose();
+        missionEvents = undefined;
+      }
+    };
+    syncMissionSubscription();
+    const unsubscribeMissionStore =
+      useManhuntGameStore.subscribe(syncMissionSubscription);
+
+    const unsubscribeManhuntEvents = registerManhuntGameEventListeners(
+      socket,
+      {
+        router,
+        getRoom: () => useRoomStore.getState().room,
+        getPlayerId: () => useRoomStore.getState().playerId,
+        synchronizeCountdown,
+        announceHuntStarted,
+        onSessionStarted: () => {
+          if (huntStartedTimer) {
+            clearTimeout(huntStartedTimer);
+            huntStartedTimer = undefined;
+          }
+        },
+        onCountdownEnded: () => {
+          if (countdownSyncTimer) {
+            clearTimeout(countdownSyncTimer);
+            countdownSyncTimer = undefined;
+          }
+          pendingCountdownSync = null;
+        },
+      },
+    );
+
     const navigateForSession = (session: ImpostorGameSession) => {
       navigateToState(session, session.state.phase);
     };
 
     const gameStarted = ({ session }: GameStartedPayload) => {
-      if (session.gameMode === "manhunt") {
-        if (!("teams" in session.state)) {
-          return;
-        }
-        const room = useRoomStore.getState().room;
-        if (room && room.code !== session.roomCode) {
-          return;
-        }
-        useClassicGameStore.getState().reset();
-        useWordGameStore.getState().reset();
-        useManhuntGameStore
-          .getState()
-          .setSession(session, room?.players ?? []);
-        const playerId = useRoomStore.getState().playerId;
-        if (playerId) {
-          useManhuntGameStore.getState().setOwnTeam(playerId);
-        }
-        if (session.state.phase === "active") {
-          router.replace("/manhunt/map");
-        } else if (session.state.phase === "countdown") {
-          router.replace("/manhunt/countdown");
-        }
-        return;
-      }
       if (!isImpostorGameSession(session)) {
         return;
       }
@@ -226,29 +303,6 @@ export function useClassicGameEvents(): void {
     };
 
     const gameStateUpdated = (payload: GameStateUpdatePayload) => {
-      const manhuntGame = useManhuntGameStore.getState();
-      if (
-        manhuntGame.session?.id === payload.sessionId &&
-        manhuntGame.session.roomCode === payload.roomCode &&
-        "teams" in payload.state
-      ) {
-        manhuntGame.setGameState(payload);
-        if (payload.state.phase !== "countdown" && countdownSyncTimer) {
-          clearTimeout(countdownSyncTimer);
-          countdownSyncTimer = undefined;
-        }
-        if (payload.state.phase !== "countdown") {
-          pendingCountdownSync = null;
-        }
-        if (payload.state.phase === "finished") {
-          router.replace("/manhunt/results");
-        } else if (payload.state.phase === "countdown") {
-          router.replace("/manhunt/countdown");
-        } else if (payload.state.phase === "active") {
-          router.replace("/manhunt/map");
-        }
-        return;
-      }
       const wordGame = useWordGameStore.getState();
       if (
         wordGame.session?.id === payload.sessionId &&
@@ -284,6 +338,12 @@ export function useClassicGameEvents(): void {
     };
     const gameEnded = (payload: GameEndedPayload) => {
       if (payload.result.gameMode === "manhunt") {
+        if (huntStartedTimer) {
+          clearTimeout(huntStartedTimer);
+          huntStartedTimer = undefined;
+        }
+        missionEvents?.dispose();
+        missionEvents = undefined;
         useManhuntGameStore.getState().setResult(payload);
         router.replace("/manhunt/results");
         return;
@@ -314,15 +374,6 @@ export function useClassicGameEvents(): void {
       useWordGameStore.getState().setReveal(payload);
     };
     let revealTimer: ReturnType<typeof setTimeout> | undefined;
-    const manhuntTeamAssigned = (payload: ManhuntTeamAssignmentPayload) => {
-      useManhuntGameStore
-        .getState()
-        .setAssignments(payload.sessionId, payload.assignments);
-      const playerId = useRoomStore.getState().playerId;
-      if (playerId) {
-        useManhuntGameStore.getState().setOwnTeam(playerId);
-      }
-    };
     const manhuntLocationFlashed = (payload: LocationFlashPayload) => {
       if (revealTimer) {
         clearTimeout(revealTimer);
@@ -344,13 +395,6 @@ export function useClassicGameEvents(): void {
     const manhuntPlayerCaught = (payload: PlayerCaughtPayload) => {
       useManhuntGameStore.getState().setCaught(payload);
     };
-    const manhuntCountdownUpdated = (payload: CountdownPayload) => {
-      const room = useRoomStore.getState().room;
-      if (room?.code !== payload.roomCode) {
-        return;
-      }
-      synchronizeCountdown(payload);
-    };
     const manhuntCountdownCancelled = (
       payload: ManhuntCountdownCancelledPayload,
     ) => {
@@ -366,6 +410,10 @@ export function useClassicGameEvents(): void {
         clearTimeout(countdownSyncTimer);
         countdownSyncTimer = undefined;
       }
+      if (huntStartedTimer) {
+        clearTimeout(huntStartedTimer);
+        huntStartedTimer = undefined;
+      }
       pendingCountdownSync = null;
       game.reset();
       if (useRoomStore.getState().room?.code === payload.roomCode) {
@@ -377,7 +425,25 @@ export function useClassicGameEvents(): void {
       if (currentRoom && currentRoom.code !== payload.room.code) {
         return;
       }
+      const classicSession = useClassicGameStore.getState().session;
+      const wordSession = useWordGameStore.getState().session;
+      const returningNonHost = isNonHostImpostorRematchUpdate(
+        currentRoom,
+        payload.room,
+        useRoomStore.getState().playerId,
+        classicSession?.roomCode === payload.room.code ||
+          wordSession?.roomCode === payload.room.code,
+      );
       useRoomStore.getState().setRoom(payload.room);
+      if (returningNonHost) {
+        resetImpostorGameStores();
+        useRoomStore
+          .getState()
+          .setNotice("The host returned this room to the lobby.");
+        router.replace("/lobby");
+        return;
+      }
+
       const game = useClassicGameStore.getState();
       if (
         game.session?.roomCode === payload.room.code &&
@@ -426,23 +492,18 @@ export function useClassicGameEvents(): void {
     };
     const onDisconnect = () => {
       disconnected = true;
+      clockSynchronizer.invalidate();
       useManhuntGameStore.getState().clearReveal();
       if (revealTimer) {
         clearTimeout(revealTimer);
         revealTimer = undefined;
       }
-    };
-    const onConnect = () => {
-      if (!disconnected) {
-        return;
+      if (huntStartedTimer) {
+        clearTimeout(huntStartedTimer);
+        huntStartedTimer = undefined;
       }
-      disconnected = false;
-      const game = getCurrentGameSession();
-      if (game && routeRef.current !== "lobby") {
-        void restoreMembership(game.roomCode);
-      }
+      useManhuntGameStore.getState().setHuntStartedAnnouncement(false);
     };
-
     async function restoreMembership(roomCode: string): Promise<void> {
       if (isRestoringMembership) {
         return;
@@ -493,8 +554,11 @@ export function useClassicGameEvents(): void {
             router.replace("/manhunt/setup");
           } else if (manhunt.gameState?.phase === "finished") {
             router.replace("/manhunt/results");
-          } else if (manhunt.gameState?.phase === "countdown") {
-            router.replace("/manhunt/countdown");
+          } else if (
+            manhunt.gameState?.phase === "countdown" &&
+            manhunt.ownTeam
+          ) {
+            router.replace(getManhuntRoleRoute(manhunt.ownTeam));
           } else if (manhunt.gameState?.phase === "active") {
             router.replace("/manhunt/map");
           }
@@ -517,6 +581,22 @@ export function useClassicGameEvents(): void {
         isRestoringMembership = false;
       }
     }
+
+    const unsubscribeReconnectListener = registerGameReconnectListener(
+      socket,
+      {
+        getManhuntRoomCode: () =>
+          useManhuntGameStore.getState().session?.roomCode ?? null,
+        getOtherGameRoomCode: () =>
+          getCurrentGameSession()?.roomCode ?? null,
+        isDisconnected: () => disconnected,
+        markConnected: () => {
+          disconnected = false;
+        },
+        currentRoute: () => routeRef.current,
+        restoreMembership,
+      },
+    );
 
     const unsubscribeRoom = useRoomStore.subscribe((state) => {
       const session = getCurrentGameSession();
@@ -541,8 +621,6 @@ export function useClassicGameEvents(): void {
     socket.on(WORD_IMPOSTOR_EVENTS.DISCUSSION, wordDiscussionStarted);
     socket.on(WORD_IMPOSTOR_EVENTS.VOTE_RESULTS, wordVoteResults);
     socket.on(WORD_IMPOSTOR_EVENTS.REVEAL, wordRolesRevealed);
-    socket.on(MANHUNT_EVENTS.TEAM_ASSIGNMENT, manhuntTeamAssigned);
-    socket.on(MANHUNT_EVENTS.COUNTDOWN, manhuntCountdownUpdated);
     socket.on(
       MANHUNT_EVENTS.COUNTDOWN_CANCELLED,
       manhuntCountdownCancelled,
@@ -555,10 +633,17 @@ export function useClassicGameEvents(): void {
     socket.on(ERROR_EVENTS.SERVER_ERROR, serverError);
     socket.on(ERROR_EVENTS.VALIDATION_ERROR, validationError);
     socket.on(CONNECTION_EVENTS.DISCONNECT, onDisconnect);
-    socket.on("connect", onConnect);
+    socket.on("connect", synchronizeServerClock);
+    if (socket.connected) {
+      synchronizeServerClock();
+    }
 
     return () => {
       unsubscribeRoom();
+      unsubscribeManhuntEvents();
+      unsubscribeMissionStore();
+      missionEvents?.dispose();
+      unsubscribeReconnectListener();
       socket.off(GAME_EVENTS.GAME_STARTED, gameStarted);
       socket.off(GAME_EVENTS.STATE_UPDATE, gameStateUpdated);
       socket.off(IMPOSTOR_EVENTS.ROLE_ASSIGNMENT, roleAssigned);
@@ -570,8 +655,6 @@ export function useClassicGameEvents(): void {
       socket.off(WORD_IMPOSTOR_EVENTS.DISCUSSION, wordDiscussionStarted);
       socket.off(WORD_IMPOSTOR_EVENTS.VOTE_RESULTS, wordVoteResults);
       socket.off(WORD_IMPOSTOR_EVENTS.REVEAL, wordRolesRevealed);
-      socket.off(MANHUNT_EVENTS.TEAM_ASSIGNMENT, manhuntTeamAssigned);
-      socket.off(MANHUNT_EVENTS.COUNTDOWN, manhuntCountdownUpdated);
       socket.off(
         MANHUNT_EVENTS.COUNTDOWN_CANCELLED,
         manhuntCountdownCancelled,
@@ -581,13 +664,20 @@ export function useClassicGameEvents(): void {
       if (revealTimer) {
         clearTimeout(revealTimer);
       }
+      if (countdownSyncTimer) {
+        clearTimeout(countdownSyncTimer);
+      }
+      if (huntStartedTimer) {
+        clearTimeout(huntStartedTimer);
+      }
       socket.off(ROOM_EVENTS.UPDATE, roomUpdated);
       socket.off(ROOM_EVENTS.PLAYER_JOINED, playerJoined);
       socket.off(ROOM_EVENTS.PLAYER_LEFT, playerLeft);
       socket.off(ERROR_EVENTS.SERVER_ERROR, serverError);
       socket.off(ERROR_EVENTS.VALIDATION_ERROR, validationError);
       socket.off(CONNECTION_EVENTS.DISCONNECT, onDisconnect);
-      socket.off("connect", onConnect);
+      socket.off("connect", synchronizeServerClock);
+      clockSynchronizer.invalidate();
     };
   }, [router]);
 

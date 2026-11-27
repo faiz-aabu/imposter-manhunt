@@ -5,7 +5,9 @@
   "main": "expo-router/entry",
   "scripts": {
     "dev": "expo start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm --prefix .. run build:api",
+    "test": "node --import tsx --test tests/*.test.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",

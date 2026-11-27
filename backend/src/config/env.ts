@@ -7,6 +7,12 @@ export interface BackendConfig {
   trustProxyHops: number;
   requireHttps: boolean;
   guestProfiles: SupabaseGuestProfileConfig | null;
+  lateGameExposureDurations: LateGameExposureDurations | null;
+}
+
+export interface LateGameExposureDurations {
+  clueDurationSeconds: number;
+  warningDurationSeconds: number;
 }
 
 export interface SupabaseGuestProfileConfig {
@@ -16,6 +22,10 @@ export interface SupabaseGuestProfileConfig {
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_RECONNECT_GRACE_PERIOD_MS = 120_000;
+const DEFAULT_LATE_GAME_EXPOSURE_DURATIONS: LateGameExposureDurations = {
+  clueDurationSeconds: 15,
+  warningDurationSeconds: 5,
+};
 const MAX_RECONNECT_GRACE_PERIOD_MS = 86_400_000;
 const MAX_TRUST_PROXY_HOPS = 5;
 
@@ -127,6 +137,52 @@ function parseIntegerSetting(
   return parsed;
 }
 
+function parseOptionalPositiveIntegerSetting(
+  name: string,
+  value: string | undefined,
+): number | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive safe integer.`);
+  }
+  return parsed;
+}
+
+function parseLateGameExposureDurations(
+  environment: NodeJS.ProcessEnv,
+): LateGameExposureDurations | null {
+  const clueDurationSeconds = parseOptionalPositiveIntegerSetting(
+    "MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS",
+    environment.MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS,
+  );
+  const warningDurationSeconds = parseOptionalPositiveIntegerSetting(
+    "MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS",
+    environment.MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS,
+  );
+  if (clueDurationSeconds === undefined && warningDurationSeconds === undefined) {
+    return { ...DEFAULT_LATE_GAME_EXPOSURE_DURATIONS };
+  }
+  if (clueDurationSeconds === undefined || warningDurationSeconds === undefined) {
+    throw new Error(
+      "MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS and MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS must be configured together.",
+    );
+  }
+  if (
+    clueDurationSeconds !==
+      DEFAULT_LATE_GAME_EXPOSURE_DURATIONS.clueDurationSeconds ||
+    warningDurationSeconds !==
+      DEFAULT_LATE_GAME_EXPOSURE_DURATIONS.warningDurationSeconds
+  ) {
+    throw new Error(
+      "Manhunt late-game exposure durations must match the approved configuration.",
+    );
+  }
+  return { clueDurationSeconds, warningDurationSeconds };
+}
+
 function parseGuestProfilesConfig(
   environment: NodeJS.ProcessEnv,
   nodeEnv: BackendConfig["nodeEnv"],
@@ -201,6 +257,8 @@ export function loadConfig(
     throw new Error("CLIENT_IP_MODE=railway is only valid in production.");
   }
   const guestProfiles = parseGuestProfilesConfig(environment, nodeEnv);
+  const lateGameExposureDurations =
+    parseLateGameExposureDurations(environment);
 
   let trustProxyHops = 0;
   if (clientIpMode === "railway") {
@@ -239,5 +297,6 @@ export function loadConfig(
     trustProxyHops,
     requireHttps: nodeEnv === "production",
     guestProfiles,
+    lateGameExposureDurations,
   };
 }

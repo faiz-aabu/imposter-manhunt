@@ -1,4 +1,5 @@
 import {
+  CLOCK_EVENTS,
   CONNECTION_EVENTS,
   ERROR_EVENTS,
   GAME_EVENTS,
@@ -11,12 +12,19 @@ import {
   locationUpdateSchema,
   manhuntReadySchema,
   catchAttemptSchema,
+  freezePlayerSchema,
+  freezeDecoyRequestSchema,
+  footstepsRequestSchema,
+  smokeBombRequestSchema,
+  ghostRequestSchema,
   catchConfirmationResponseSchema,
+  clockSyncSchema,
   manhuntCountdownSyncSchema,
   createRoomSchema,
   joinRoomSchema,
   leaveRoomSchema,
   roomCodeSchema,
+  returnToLobbySchema,
   roleRequestSchema,
   startGameSchema,
   updateRoomSettingsSchema,
@@ -25,13 +33,17 @@ import {
   wordImpostorVoteSubmissionSchema,
 } from "@impostor/api";
 import type {
+  ClockSyncResponsePayload,
   CreateRoomResponse,
+  GameSessionId,
   JoinRoomResponse,
   PlayerJoinedPayload,
   PlayerId,
   PlayerLeftPayload,
   PlayerReconnectedPayload,
   ReconnectPayload,
+  RoomCode,
+  ManhuntBoundary,
   Room,
   RoomUpdatePayload,
   ServerErrorPayload,
@@ -42,7 +54,17 @@ import { ClassicImpostorService } from "../games/imposter/classic-game-service.j
 import { WordImpostorService } from "../games/imposter/word-game-service.js";
 import { ManhuntGameService } from "../manhunt/manhunt-game-service.js";
 import { InMemoryRateLimiter } from "../services/rate-limiter.js";
+import type { RoomPersistenceCommands } from "../rooms/room-persistence-commands.js";
+import { DurableRoomTimeoutScheduler } from "../rooms/durable-room-timeout-scheduler.js";
+import {
+  isRuntimeGuardedRoomPersistenceCommands,
+} from "../rooms/durable-room-runtime.js";
+import type {
+  DurableTimeoutSchedulerDiagnostics,
+} from "../rooms/durable-room-timeout-scheduler.js";
+import { fenceDurableGameRoom } from "../rooms/persist-game-status-transition.js";
 import { RoomService } from "../rooms/room-service.js";
+import type { RoomGameStatusReservation } from "../rooms/room-service.js";
 import { AppError } from "../utils/app-error.js";
 import { getClientIp } from "../utils/client-ip.js";
 import type { ClientIpMode } from "../utils/client-ip.js";
@@ -58,6 +80,7 @@ const SOCKET_CONNECTION_LIMIT = 60;
 const ROOM_CREATION_LIMIT = 5;
 const ROOM_JOIN_LIMIT = 12;
 const RECONNECT_LIMIT = 10;
+const CLOCK_SYNC_LIMIT = 12;
 const WORD_ROLE_REQUEST_LIMIT = 20;
 const WORD_VOTE_LIMIT = 20;
 const MANHUNT_LOCATION_LIMIT = 12;
@@ -70,6 +93,8 @@ interface SocketHandlerOptions {
   nodeEnv: "development" | "test" | "production";
   clientIpMode: ClientIpMode;
   trustProxyHops: number;
+  roomPersistenceCommands?: RoomPersistenceCommands;
+  isServingReady?: () => boolean;
 }
 
 interface ReconnectParseResult {
@@ -91,22 +116,138 @@ export function attachRoomSocketHandlers(
   wordGames: WordImpostorService,
   manhuntGames: ManhuntGameService,
   options: SocketHandlerOptions,
-): { close: () => void } {
+): {
+  close: () => void;
+  getDiagnostics: () => DurableTimeoutSchedulerDiagnostics;
+} {
   const rateLimiter = new InMemoryRateLimiter();
   const disconnectTimers = new Map<string, NodeJS.Timeout>();
   let isClosing = false;
+  const isServingReady = () =>
+    options.isServingReady?.() ?? true;
   const includeErrorDetails = options.nodeEnv !== "production";
   const reportSocketError = <T>(
     socket: GameSocket,
     acknowledgement: SocketAck<T> | undefined,
     error: unknown,
   ) => reportError(socket, acknowledgement, error, includeErrorDetails);
+  const persistenceCommands = options.roomPersistenceCommands;
+  if (
+    persistenceCommands
+    && !isRuntimeGuardedRoomPersistenceCommands(persistenceCommands)
+  ) {
+    throw new TypeError(
+      "Socket handlers require runtime-gated durable room commands.",
+    );
+  }
+  const persistedTimeoutScheduler = persistenceCommands
+    ? new DurableRoomTimeoutScheduler({
+      scheduleTimeout: (callback, delayMs) => {
+        const timer = setTimeout(callback, delayMs);
+        timer.unref();
+        return () => clearTimeout(timer);
+      },
+      now: () => new Date(),
+      isServingReady: () => !isClosing,
+      claimTimeoutOwnership: (roomCode, playerId, owner) =>
+        rooms.claimDisconnectTimeout(roomCode, playerId, owner),
+      releaseTimeoutOwnership: (roomCode, playerId, owner) =>
+        rooms.releaseDisconnectTimeout(roomCode, playerId, owner),
+      removeDisconnectedPlayer: (timeout, now) =>
+        persistenceCommands.removeDisconnectedPlayer(
+          timeout.roomCode,
+          timeout.playerId,
+          timeout.disconnectGeneration,
+          timeout.reconnectDeadlineAt,
+          now,
+        ),
+      onRemoval: async (removal) => {
+        await classicGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+        await wordGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+        await manhuntGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+        publishPlayerLeft(io, removal);
+      },
+      reportFailure: (error, context) => {
+        if (context.phase === "side_effect") {
+          const suspensionScope =
+            context.removal?.suspensionScope
+            ?? rooms.getGameplaySuspensionScope(context.roomCode, null);
+          if (suspensionScope) {
+            rooms.suspendGameplay(
+              context.roomCode,
+              suspensionScope,
+              "durable_timeout_post_commit_side_effect_failure",
+            );
+          } else {
+            logInternalError(
+              "Could not suspend a room after committed timeout side effects failed because its identity was unavailable.",
+              new Error("Committed timeout removal did not retain room identity."),
+              includeErrorDetails,
+            );
+          }
+        }
+        try {
+          persistenceCommands.fenceRoom(context.roomCode);
+        } catch (fenceError) {
+          logInternalError(
+            "Could not fence a failed reconnect-timeout removal.",
+            fenceError,
+            includeErrorDetails,
+          );
+        }
+        logInternalError(
+          context.phase === "side_effect"
+            ? "Reconnect-timeout persistence committed, but its side effects failed; the result remains retained."
+            : context.phase === "persistence"
+              ? "Reconnect-timeout persistence failed; the operation remains retained for reconciliation."
+              : "Could not schedule or validate a reconnect timeout; the result remains retained.",
+          error,
+          includeErrorDetails,
+        );
+      },
+    })
+    : undefined;
+  const removeExpiredRoomListener = rooms.onExpiredRoom(async (expired) => {
+    for (const playerId of expired.playerIds) {
+      clearDisconnectTimer(makeTimerKey(expired.roomCode, playerId));
+      persistedTimeoutScheduler?.cancelPlayer(expired.roomCode, playerId);
+    }
+    for (const socketId of expired.socketIds) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (!socket) {
+        continue;
+      }
+      await socket.leave(expired.roomCode);
+      if (socket.data.roomCode === expired.roomCode) {
+        socket.data.roomCode = undefined;
+        socket.data.playerId = undefined;
+      }
+    }
+  });
 
   const onConnection = (socket: GameSocket) => {
-    if (isClosing) {
+    if (isClosing || !isServingReady()) {
       socket.disconnect(true);
       return;
     }
+
+    socket.use((_packet, next) => {
+      if (isClosing || !isServingReady()) {
+        socket.disconnect(true);
+        next(new Error("Backend is not accepting gameplay traffic."));
+        return;
+      }
+      next();
+    });
 
     const address = getClientAddress(socket, options);
     if (!address) {
@@ -140,8 +281,16 @@ export function attachRoomSocketHandlers(
       void handleUpdateRoomSettings(socket, payload, acknowledgement);
     });
 
+    socket.on(ROOM_EVENTS.RETURN_TO_LOBBY, (payload, acknowledgement) => {
+      handleReturnToLobby(socket, payload, acknowledgement);
+    });
+
     socket.on(GAME_EVENTS.START_GAME, (payload, acknowledgement) => {
-      handleStartGame(socket, payload, acknowledgement);
+      void handleStartGame(socket, payload, acknowledgement);
+    });
+
+    socket.on(CLOCK_EVENTS.SYNC, (payload, acknowledgement) => {
+      handleClockSync(socket, payload, acknowledgement);
     });
 
     socket.on(IMPOSTOR_EVENTS.ROLE_REQUEST, (payload) => {
@@ -166,6 +315,26 @@ export function attachRoomSocketHandlers(
 
     socket.on(MANHUNT_EVENTS.LOCATION_UPDATE, (payload, acknowledgement) => {
       handleManhuntLocation(socket, payload, acknowledgement);
+    });
+
+    socket.on(MANHUNT_EVENTS.FREEZE, (payload, acknowledgement) => {
+      handleManhuntFreeze(socket, payload, acknowledgement);
+    });
+
+    socket.on(MANHUNT_EVENTS.FOOTSTEPS, (payload, acknowledgement) => {
+      handleManhuntFootsteps(socket, payload, acknowledgement);
+    });
+
+    socket.on(MANHUNT_EVENTS.SMOKE_BOMB, (payload, acknowledgement) => {
+      handleManhuntSmokeBomb(socket, payload, acknowledgement);
+    });
+
+    socket.on(MANHUNT_EVENTS.GHOST, (payload, acknowledgement) => {
+      handleManhuntGhost(socket, payload, acknowledgement);
+    });
+
+    socket.on(MANHUNT_EVENTS.FREEZE_DECOY, (payload, acknowledgement) => {
+      handleManhuntFreezeDecoy(socket, payload, acknowledgement);
     });
 
     socket.on(MANHUNT_EVENTS.READY_UPDATE, (payload) => {
@@ -200,11 +369,18 @@ export function attachRoomSocketHandlers(
         return;
       }
 
+      if (options.roomPersistenceCommands) {
+        void handlePersistedDisconnect(socket.id);
+        return;
+      }
+
       const disconnected = rooms.disconnectSocket(socket.id);
       if (!disconnected) {
         return;
       }
 
+      classicGames.onPlayerConnectionChanged(disconnected.roomCode);
+      wordGames.onPlayerConnectionChanged(disconnected.roomCode);
       manhuntGames.onPlayerDisconnected(
         disconnected.roomCode,
         disconnected.playerId,
@@ -225,36 +401,67 @@ export function attachRoomSocketHandlers(
           disconnected.playerId,
         );
         if (removal) {
-          classicGames.onPlayerRemoved(
-            removal.roomCode,
-            removal.room !== undefined,
-          );
-          wordGames.onPlayerRemoved(
-            removal.roomCode,
-            removal.room !== undefined,
-          );
-          manhuntGames.onPlayerRemoved(
-            removal.roomCode,
-            removal.room !== undefined,
-          );
-          publishPlayerLeft(io, removal);
+          void Promise.resolve()
+            .then(async () => {
+              await classicGames.onPlayerRemoved(
+                removal.roomCode,
+                removal.room !== undefined,
+              );
+              await wordGames.onPlayerRemoved(
+                removal.roomCode,
+                removal.room !== undefined,
+              );
+              await manhuntGames.onPlayerRemoved(
+                removal.roomCode,
+                removal.room !== undefined,
+              );
+            })
+            .then(() => publishPlayerLeft(io, removal))
+            .catch((error: unknown) => {
+              logInternalError(
+                "Could not finish removing a disconnected room member.",
+                error,
+                includeErrorDetails,
+              );
+            });
         }
       }, options.reconnectGracePeriodMs);
       timer.unref();
       disconnectTimers.set(timerKey, timer);
     });
   };
+  if (persistedTimeoutScheduler) {
+    try {
+      for (const timeout of rooms.listDisconnectedPlayerTimeouts()) {
+        persistedTimeoutScheduler.schedule(timeout);
+      }
+    } catch (error) {
+      persistedTimeoutScheduler.cancelAll();
+      removeExpiredRoomListener();
+      throw error;
+    }
+  }
   io.on("connection", onConnection);
 
   return {
     close: () => {
+      if (isClosing) {
+        return;
+      }
       isClosing = true;
       io.off("connection", onConnection);
+      removeExpiredRoomListener();
       for (const timer of disconnectTimers.values()) {
         clearTimeout(timer);
       }
       disconnectTimers.clear();
+      persistedTimeoutScheduler?.cancelAll();
     },
+    getDiagnostics: () =>
+      persistedTimeoutScheduler?.getDiagnostics() ?? {
+        scheduledTimeouts: 0,
+        pendingPostCommitSideEffects: 0,
+      },
   };
 
   async function handleCreateRoom(
@@ -283,22 +490,44 @@ export function attachRoomSocketHandlers(
 
     let response: CreateRoomResponse | undefined;
     try {
-      response = rooms.createRoom(parsed.data, socket.id);
+      response = options.roomPersistenceCommands
+        ? await options.roomPersistenceCommands.createRoom(parsed.data, socket.id)
+        : rooms.createRoom(parsed.data, socket.id);
       await socket.join(response.room.code);
       socket.data.playerId = response.playerId;
       socket.data.roomCode = response.room.code;
+      if (response.room.settings.gameMode === "manhunt") {
+        emitManhuntBoundaryToSocket(
+          socket,
+          rooms,
+          manhuntGames,
+          response.room.code,
+        );
+      }
       acknowledgeSuccess(acknowledgement, response);
       publishRoomUpdate(io, response.room);
     } catch (error) {
       if (response) {
-        try {
-          rooms.leaveRoom(response.room.code, socket.id);
-        } catch (rollbackError) {
-          logInternalError(
-            "Could not roll back failed room creation.",
-            rollbackError,
-            includeErrorDetails,
-          );
+        if (options.roomPersistenceCommands) {
+          try {
+            options.roomPersistenceCommands.fenceRoom(response.room.code);
+          } catch (fenceError) {
+            logInternalError(
+              "Could not fence room after failed socket setup.",
+              fenceError,
+              includeErrorDetails,
+            );
+          }
+        } else {
+          try {
+            rooms.leaveRoom(response.room.code, socket.id);
+          } catch (rollbackError) {
+            logInternalError(
+              "Could not roll back failed room creation.",
+              rollbackError,
+              includeErrorDetails,
+            );
+          }
         }
       }
       reportSocketError(socket, acknowledgement, error);
@@ -331,7 +560,9 @@ export function attachRoomSocketHandlers(
 
     let response: JoinRoomResponse | undefined;
     try {
-      response = rooms.joinRoom(parsed.data, socket.id);
+      response = options.roomPersistenceCommands
+        ? await options.roomPersistenceCommands.joinRoom(parsed.data, socket.id)
+        : rooms.joinRoom(parsed.data, socket.id);
       await socket.join(response.room.code);
       socket.data.playerId = response.playerId;
       socket.data.roomCode = response.room.code;
@@ -341,6 +572,14 @@ export function attachRoomSocketHandlers(
       );
       if (!player) {
         throw new Error("Joined player was missing from the room snapshot.");
+      }
+      if (response.room.settings.gameMode === "manhunt") {
+        emitManhuntBoundaryToSocket(
+          socket,
+          rooms,
+          manhuntGames,
+          response.room.code,
+        );
       }
 
       const joinedPayload: PlayerJoinedPayload = {
@@ -352,14 +591,26 @@ export function attachRoomSocketHandlers(
       publishRoomUpdate(io, response.room);
     } catch (error) {
       if (response) {
-        try {
-          rooms.leaveRoom(response.room.code, socket.id);
-        } catch (rollbackError) {
-          logInternalError(
-            "Could not roll back failed room join.",
-            rollbackError,
-            includeErrorDetails,
-          );
+        if (options.roomPersistenceCommands) {
+          try {
+            options.roomPersistenceCommands.fenceRoom(response.room.code);
+          } catch (fenceError) {
+            logInternalError(
+              "Could not fence room after failed socket setup.",
+              fenceError,
+              includeErrorDetails,
+            );
+          }
+        } else {
+          try {
+            rooms.leaveRoom(response.room.code, socket.id);
+          } catch (rollbackError) {
+            logInternalError(
+              "Could not roll back failed room join.",
+              rollbackError,
+              includeErrorDetails,
+            );
+          }
         }
       }
       reportSocketError(socket, acknowledgement, error);
@@ -378,24 +629,38 @@ export function attachRoomSocketHandlers(
     }
 
     try {
-      const removal = rooms.leaveRoom(parsed.data.roomCode, socket.id);
+      const removal = options.roomPersistenceCommands
+        ? await options.roomPersistenceCommands.leaveRoom(
+            parsed.data.roomCode,
+            socket.id,
+          )
+        : rooms.leaveRoom(parsed.data.roomCode, socket.id);
       clearDisconnectTimer(makeTimerKey(removal.roomCode, removal.playerId));
+      persistedTimeoutScheduler?.cancelPlayer(removal.roomCode, removal.playerId);
       await socket.leave(removal.roomCode);
       socket.data.playerId = undefined;
       socket.data.roomCode = undefined;
+      try {
+        await classicGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+        await wordGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+        await manhuntGames.onPlayerRemoved(
+          removal.roomCode,
+          removal.room !== undefined,
+        );
+      } catch (error) {
+        logInternalError(
+          "The leave committed, but game completion or countdown cancellation did not complete.",
+          error,
+          includeErrorDetails,
+        );
+      }
       acknowledgeSuccess(acknowledgement, undefined);
-      classicGames.onPlayerRemoved(
-        removal.roomCode,
-        removal.room !== undefined,
-      );
-      wordGames.onPlayerRemoved(
-        removal.roomCode,
-        removal.room !== undefined,
-      );
-      manhuntGames.onPlayerRemoved(
-        removal.roomCode,
-        removal.room !== undefined,
-      );
       publishPlayerLeft(io, removal);
     } catch (error) {
       reportSocketError(socket, acknowledgement, error);
@@ -414,7 +679,15 @@ export function attachRoomSocketHandlers(
     }
 
     try {
-      const room = rooms.updateRoomSettings(parsed.data, socket.id);
+      const room = options.roomPersistenceCommands
+        ? await options.roomPersistenceCommands.updateRoomSettings(
+            parsed.data,
+            socket.id,
+          )
+        : rooms.updateRoomSettings(parsed.data, socket.id);
+      if (parsed.data.settings.gameMode === "manhunt") {
+        emitManhuntBoundaryToSocket(socket, rooms, manhuntGames, room.code);
+      }
       const response: RoomUpdatePayload = { room };
       acknowledgeSuccess(acknowledgement, response);
       publishRoomUpdate(io, room);
@@ -423,29 +696,189 @@ export function attachRoomSocketHandlers(
     }
   }
 
-  function handleStartGame(
+  async function handleReturnToLobby(
     socket: GameSocket,
     payload: unknown,
-    acknowledgement: SocketAck<void> | undefined,
-  ): void {
-    const parsed = startGameSchema.safeParse(payload);
+    acknowledgement: SocketAck<RoomUpdatePayload> | undefined,
+  ): Promise<void> {
+    const parsed = returnToLobbySchema.safeParse(payload);
     if (!parsed.success) {
       reportValidationError(socket, acknowledgement, parsed.error.issues);
       return;
     }
 
     try {
-      const room = rooms.getPublicRoom(parsed.data.roomCode);
-      if (room?.settings.gameMode === "impostor-word") {
-        wordGames.startGame(parsed.data.roomCode, socket.id);
-      } else if (room?.settings.gameMode === "manhunt") {
-        manhuntGames.startGame(parsed.data.roomCode, socket.id);
-      } else {
-        classicGames.startGame(parsed.data.roomCode, socket.id);
+      const currentRoom = rooms.getPublicRoom(parsed.data.roomCode);
+      if (!currentRoom) {
+        throw new AppError("ROOM_NOT_FOUND", "Room does not exist.");
       }
+
+      let room: Room;
+      if (currentRoom.settings.gameMode === "impostor-classic") {
+        room = options.roomPersistenceCommands
+          ? await classicGames.returnToLobbyPersisted(
+              parsed.data.roomCode,
+              socket.id,
+            )
+          : classicGames.returnToLobby(parsed.data.roomCode, socket.id);
+      } else if (currentRoom.settings.gameMode === "impostor-word") {
+        room = options.roomPersistenceCommands
+          ? await wordGames.returnToLobbyPersisted(
+              parsed.data.roomCode,
+              socket.id,
+            )
+          : wordGames.returnToLobby(parsed.data.roomCode, socket.id);
+      } else if (currentRoom.settings.gameMode === "manhunt") {
+        room = await manhuntGames.returnToLobby(parsed.data.roomCode, socket.id);
+      } else {
+        throw new AppError(
+          "GAME_NOT_READY",
+          "This room cannot return to the lobby.",
+        );
+      }
+      const response: RoomUpdatePayload = { room };
+      acknowledgeSuccess(acknowledgement, response);
+      publishRoomUpdate(io, room);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  async function handleStartGame(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): Promise<void> {
+    const parsed = startGameSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+
+    if (!options.roomPersistenceCommands) {
+      try {
+        const room = rooms.getPublicRoom(parsed.data.roomCode);
+        if (room?.settings.gameMode === "impostor-word") {
+          wordGames.startGame(parsed.data.roomCode, socket.id);
+        } else if (room?.settings.gameMode === "manhunt") {
+          manhuntGames.startGame(parsed.data.roomCode, socket.id);
+        } else {
+          classicGames.startGame(parsed.data.roomCode, socket.id);
+        }
+        acknowledgeSuccess(acknowledgement, undefined);
+      } catch (error) {
+        reportSocketError(socket, acknowledgement, error);
+      }
+      return;
+    }
+
+    let reservation: RoomGameStatusReservation | undefined;
+    let discardPreparedStart: (() => void) | undefined;
+    try {
+      reservation =
+        await options.roomPersistenceCommands.acquireGameStatusReservation(
+          parsed.data.roomCode,
+          "waiting",
+          null,
+          socket.id,
+        );
+      const room = rooms.getPublicRoom(parsed.data.roomCode);
+      if (!room) {
+        throw new AppError("ROOM_NOT_FOUND", "Room does not exist.");
+      }
+
+      let preparedGameId: GameSessionId;
+      let commitPreparedStart: (() => void) | undefined;
+      if (room.settings.gameMode === "impostor-word") {
+        const prepared = wordGames.prepareStart(
+          parsed.data.roomCode,
+          socket.id,
+        );
+        preparedGameId = prepared.gameId;
+        discardPreparedStart = () => wordGames.discardPreparedStart(prepared);
+        commitPreparedStart = () => {
+          wordGames.commitPreparedStart(prepared, reservation);
+        };
+      } else if (room.settings.gameMode === "manhunt") {
+        const prepared = manhuntGames.prepareStart(
+          parsed.data.roomCode,
+          socket.id,
+        );
+        preparedGameId = prepared.gameId;
+        discardPreparedStart = () => manhuntGames.discardPreparedStart(prepared);
+        commitPreparedStart = () => {
+          manhuntGames.commitPreparedStart(prepared, reservation);
+        };
+      } else {
+        const prepared = classicGames.prepareStart(
+          parsed.data.roomCode,
+          socket.id,
+        );
+        preparedGameId = prepared.gameId;
+        discardPreparedStart = () => classicGames.discardPreparedStart(prepared);
+        commitPreparedStart = () => {
+          classicGames.commitPreparedStart(prepared, reservation);
+        };
+      }
+
+      const hostPlayerId = reservation.hostPlayerId;
+      if (!hostPlayerId) {
+        throw new AppError(
+          "NOT_AUTHORIZED",
+          "A host identity is required to start a durable game.",
+        );
+      }
+
+      try {
+        await options.roomPersistenceCommands.transitionRoomGameStatus({
+          roomCode: parsed.data.roomCode,
+          expectedStatus: "waiting",
+          nextStatus: "starting",
+          expectedCurrentGameId: null,
+          nextGameId: preparedGameId,
+          initiatedBy: { kind: "host", playerId: hostPlayerId },
+          reservation,
+        });
+      } catch (error) {
+        fenceDurableGameRoom(
+          rooms,
+          options.roomPersistenceCommands,
+          parsed.data.roomCode,
+        );
+        throw error;
+      }
+
+      try {
+        commitPreparedStart();
+      } catch (error) {
+        fenceDurableGameRoom(
+          rooms,
+          options.roomPersistenceCommands,
+          parsed.data.roomCode,
+        );
+        console.error(
+          JSON.stringify({
+            level: "error",
+            event: "durable_game_start_commit_failed",
+            roomCode: parsed.data.roomCode,
+            gameId: preparedGameId,
+            error: error instanceof Error ? error.message : "unknown",
+          }),
+        );
+        throw new AppError(
+          "UNKNOWN",
+          "The durable game start committed but live state could not be synchronized safely.",
+        );
+      }
+
       acknowledgeSuccess(acknowledgement, undefined);
     } catch (error) {
       reportSocketError(socket, acknowledgement, error);
+    } finally {
+      discardPreparedStart?.();
+      if (reservation) {
+        rooms.releaseGameStatusReservation(reservation);
+      }
     }
   }
 
@@ -488,6 +921,9 @@ export function attachRoomSocketHandlers(
         parsed.data.roomCode,
         voterId,
         parsed.data.targetPlayerId,
+        parsed.data.sessionId,
+        parsed.data.votingEndsAt,
+        parsed.data.votingPhaseId,
       );
     } catch (error) {
       reportSocketError(socket, undefined, error);
@@ -557,31 +993,48 @@ export function attachRoomSocketHandlers(
         parsed.data.roomCode,
         voterId,
         parsed.data.targetPlayerId,
+        parsed.data.sessionId,
+        parsed.data.votingEndsAt,
+        parsed.data.votingPhaseId,
       );
     } catch (error) {
       reportSocketError(socket, undefined, error);
     }
   }
 
-  function handleManhuntSettings(
+  async function handleManhuntSettings(
     socket: GameSocket,
     payload: unknown,
     acknowledgement: SocketAck<RoomUpdatePayload> | undefined,
-  ): void {
+  ): Promise<void> {
     const parsed = manhuntUpdateSettingsSchema.safeParse(payload);
     if (!parsed.success) {
       reportValidationError(socket, acknowledgement, parsed.error.issues);
       return;
     }
     try {
-      manhuntGames.updateSettings(
-        parsed.data.roomCode,
-        socket.id,
-        parsed.data.settings,
-      );
-      const room = rooms.getPublicRoom(parsed.data.roomCode);
-      if (room) {
+      if (options.roomPersistenceCommands) {
+        const room = await options.roomPersistenceCommands.updateManhuntSettings(
+          parsed.data.roomCode,
+          socket.id,
+          parsed.data.settings,
+        );
+        manhuntGames.publishSettingsUpdated(
+          parsed.data.roomCode,
+          parsed.data.settings,
+          room,
+        );
         acknowledgeSuccess(acknowledgement, { room });
+      } else {
+        manhuntGames.updateSettings(
+          parsed.data.roomCode,
+          socket.id,
+          parsed.data.settings,
+        );
+        const room = rooms.getPublicRoom(parsed.data.roomCode);
+        if (room) {
+          acknowledgeSuccess(acknowledgement, { room });
+        }
       }
     } catch (error) {
       reportSocketError(socket, acknowledgement, error);
@@ -619,6 +1072,121 @@ export function attachRoomSocketHandlers(
         parsed.data.clientTimestamp,
       );
       acknowledgeSuccess(acknowledgement, result);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  function handleManhuntFreeze(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): void {
+    const parsed = freezePlayerSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+    try {
+      manhuntGames.activateFreeze(
+        parsed.data.roomCode,
+        socket.id,
+        parsed.data.sessionId,
+        parsed.data.requestId,
+      );
+      acknowledgeSuccess(acknowledgement, undefined);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  function handleManhuntFootsteps(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): void {
+    const parsed = footstepsRequestSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+    try {
+      manhuntGames.activateFootsteps(
+        parsed.data.roomCode,
+        socket.id,
+        parsed.data.sessionId,
+        parsed.data.requestId,
+      );
+      acknowledgeSuccess(acknowledgement, undefined);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  function handleManhuntSmokeBomb(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): void {
+    const parsed = smokeBombRequestSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+    try {
+      manhuntGames.activateSmokeBomb(
+        parsed.data.roomCode,
+        socket.id,
+        parsed.data.sessionId,
+        parsed.data.requestId,
+      );
+      acknowledgeSuccess(acknowledgement, undefined);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  function handleManhuntGhost(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): void {
+    const parsed = ghostRequestSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+    try {
+      manhuntGames.activateGhost(
+        parsed.data.roomCode,
+        socket.id,
+        parsed.data.sessionId,
+        parsed.data.requestId,
+      );
+      acknowledgeSuccess(acknowledgement, undefined);
+    } catch (error) {
+      reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  function handleManhuntFreezeDecoy(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<void> | undefined,
+  ): void {
+    const parsed = freezeDecoyRequestSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+    try {
+      manhuntGames.activateFreezeDecoy(
+        parsed.data.roomCode,
+        socket.id,
+        parsed.data.sessionId,
+        parsed.data.requestId,
+      );
+      acknowledgeSuccess(acknowledgement, undefined);
     } catch (error) {
       reportSocketError(socket, acknowledgement, error);
     }
@@ -740,6 +1308,36 @@ export function attachRoomSocketHandlers(
     }
   }
 
+  function handleClockSync(
+    socket: GameSocket,
+    payload: unknown,
+    acknowledgement: SocketAck<ClockSyncResponsePayload> | undefined,
+  ): void {
+    if (
+      !allowPlayerAction(
+        socket,
+        "clock-sync",
+        CLOCK_SYNC_LIMIT,
+        rateLimiter,
+        includeErrorDetails,
+        acknowledgement,
+      )
+    ) {
+      return;
+    }
+
+    const parsed = clockSyncSchema.safeParse(payload);
+    if (!parsed.success) {
+      reportValidationError(socket, acknowledgement, parsed.error.issues);
+      return;
+    }
+
+    acknowledgeSuccess(acknowledgement, {
+      requestId: parsed.data.requestId,
+      serverTime: new Date().toISOString(),
+    });
+  }
+
   async function handleReconnect(
     socket: GameSocket,
     payload: unknown,
@@ -765,9 +1363,18 @@ export function attachRoomSocketHandlers(
     }
 
     try {
-      const result = rooms.reconnect(parsed.payload, socket.id);
+      const result = options.roomPersistenceCommands
+        ? await options.roomPersistenceCommands.reconnect(
+            parsed.payload,
+            socket.id,
+          )
+        : rooms.reconnect(parsed.payload, socket.id);
       clearDisconnectTimer(
         makeTimerKey(result.payload.roomCode, result.payload.player.id),
+      );
+      persistedTimeoutScheduler?.cancelPlayer(
+        result.payload.roomCode,
+        result.payload.player.id,
       );
 
       if (result.previousSocketId) {
@@ -777,11 +1384,21 @@ export function attachRoomSocketHandlers(
       await socket.join(result.payload.roomCode);
       socket.data.playerId = result.payload.player.id;
       socket.data.roomCode = result.payload.roomCode;
+      if (result.room.settings.gameMode === "manhunt") {
+        emitManhuntBoundaryToSocket(
+          socket,
+          rooms,
+          manhuntGames,
+          result.payload.roomCode,
+        );
+      }
       acknowledgeSuccess(acknowledgement, result.payload);
       io
         .to(result.payload.roomCode)
         .emit(CONNECTION_EVENTS.PLAYER_RECONNECTED, result.payload);
       publishRoomUpdate(io, result.room);
+      classicGames.onPlayerConnectionChanged(result.payload.roomCode);
+      wordGames.onPlayerConnectionChanged(result.payload.roomCode);
       const classicSnapshot = classicGames.getResumeSnapshot(
         result.payload.roomCode,
         result.payload.player.id,
@@ -830,6 +1447,73 @@ export function attachRoomSocketHandlers(
       ) {
         socket.emit(GAME_EVENTS.GAME_STARTED, manhuntSnapshot.started);
         socket.emit(GAME_EVENTS.STATE_UPDATE, manhuntSnapshot.state);
+        socket.emit(
+          MANHUNT_EVENTS.TEAM_ASSIGNMENT,
+          manhuntSnapshot.teamAssignment,
+        );
+        if (manhuntSnapshot.missionAssignment) {
+          socket.emit(
+            MANHUNT_EVENTS.MISSION_ASSIGNMENT,
+            manhuntSnapshot.missionAssignment,
+          );
+        }
+        if (manhuntSnapshot.missionReveal) {
+          socket.emit(
+            MANHUNT_EVENTS.MISSION_REVEAL,
+            manhuntSnapshot.missionReveal,
+          );
+        }
+        if (manhuntSnapshot.freezeWarning) {
+          socket.emit(
+            MANHUNT_EVENTS.FREEZE_WARNING,
+            manhuntSnapshot.freezeWarning,
+          );
+        }
+        if (manhuntSnapshot.playerFrozen) {
+          socket.emit(
+            MANHUNT_EVENTS.PLAYER_FROZEN,
+            manhuntSnapshot.playerFrozen,
+          );
+        }
+        if (manhuntSnapshot.footsteps) {
+          socket.emit(
+            MANHUNT_EVENTS.FOOTSTEPS_STATE,
+            manhuntSnapshot.footsteps,
+          );
+        }
+        if (manhuntSnapshot.smokeBomb) {
+          socket.emit(
+            MANHUNT_EVENTS.SMOKE_BOMB_STATE,
+            manhuntSnapshot.smokeBomb,
+          );
+        }
+        if (manhuntSnapshot.ghost) {
+          socket.emit(MANHUNT_EVENTS.GHOST_STATE, manhuntSnapshot.ghost);
+        }
+        if (manhuntSnapshot.freezeDecoys) {
+          socket.emit(
+            MANHUNT_EVENTS.FREEZE_DECOY_STATE,
+            manhuntSnapshot.freezeDecoys,
+          );
+        }
+        if (manhuntSnapshot.freezeDecoyUsage) {
+          socket.emit(
+            MANHUNT_EVENTS.FREEZE_DECOY_USAGE_STATE,
+            manhuntSnapshot.freezeDecoyUsage,
+          );
+        }
+        if (manhuntSnapshot.lateGameClue) {
+          socket.emit(
+            MANHUNT_EVENTS.LATE_GAME_CLUE_STATE,
+            manhuntSnapshot.lateGameClue,
+          );
+        }
+        if (manhuntSnapshot.lateGameWarning) {
+          socket.emit(
+            MANHUNT_EVENTS.LATE_GAME_WARNING_STATE,
+            manhuntSnapshot.lateGameWarning,
+          );
+        }
         if (manhuntSnapshot.countdown) {
           socket.emit(MANHUNT_EVENTS.COUNTDOWN, manhuntSnapshot.countdown);
         }
@@ -837,8 +1521,74 @@ export function attachRoomSocketHandlers(
           socket.emit(GAME_EVENTS.GAME_ENDED, manhuntSnapshot.ended);
         }
       }
+      manhuntGames.onPlayerConnected(
+        result.payload.roomCode,
+        result.payload.player.id,
+      );
     } catch (error) {
       reportSocketError(socket, acknowledgement, error);
+    }
+  }
+
+  async function handlePersistedDisconnect(socketId: string): Promise<void> {
+    const commands = options.roomPersistenceCommands;
+    if (!commands) {
+      return;
+    }
+
+    try {
+      const disconnected = await commands.disconnectSocket(
+        socketId,
+        options.reconnectGracePeriodMs,
+      );
+      if (!disconnected) {
+        return;
+      }
+
+      classicGames.onPlayerConnectionChanged(disconnected.roomCode);
+      wordGames.onPlayerConnectionChanged(disconnected.roomCode);
+      manhuntGames.onPlayerDisconnected(
+        disconnected.roomCode,
+        disconnected.playerId,
+      );
+      io.to(disconnected.roomCode).emit(ROOM_EVENTS.UPDATE, {
+        room: disconnected.room,
+      });
+
+      if (
+        disconnected.disconnectGeneration === undefined
+        || disconnected.reconnectDeadlineAt === undefined
+      ) {
+        throw new Error("Durable disconnect result did not include timeout metadata.");
+      }
+      try {
+        if (!persistedTimeoutScheduler) {
+          throw new Error("Persisted reconnect timeout scheduler is unavailable.");
+        }
+        persistedTimeoutScheduler.schedule({
+          roomCode: disconnected.roomCode,
+          playerId: disconnected.playerId,
+          disconnectGeneration: disconnected.disconnectGeneration,
+          reconnectDeadlineAt: disconnected.reconnectDeadlineAt,
+        });
+      } catch (error) {
+        try {
+          commands.fenceRoom(disconnected.roomCode);
+        } catch (fenceError) {
+          logInternalError(
+            "Could not fence a room after reconnect timeout scheduling failed.",
+            fenceError,
+            includeErrorDetails,
+          );
+        }
+        throw error;
+      }
+    } catch (error) {
+      logInternalError(
+        "Could not persist the disconnected room member.",
+        error,
+        includeErrorDetails,
+      );
     }
   }
 
@@ -878,6 +1628,22 @@ export function attachRoomSocketHandlers(
 
 function makeTimerKey(roomCode: string, playerId: string): string {
   return `${roomCode}:${playerId}`;
+}
+
+function emitManhuntBoundaryToSocket(
+  socket: GameSocket,
+  rooms: RoomService,
+  manhuntGames: ManhuntGameService,
+  roomCode: string,
+): void {
+  const playerId = rooms.getPlayerIdForSocket(roomCode, socket.id);
+  if (rooms.getSocketIdForPlayer(roomCode, playerId) !== socket.id) {
+    throw new Error("Manhunt boundary recipient is not an active room member.");
+  }
+  socket.emit(MANHUNT_EVENTS.BOUNDARY_UPDATE, {
+    roomCode,
+    boundary: manhuntGames.getBoundaryForPlayer(roomCode, playerId) ?? null,
+  });
 }
 
 function publishRoomUpdate(io: GameSocketServer, room: Room): void {

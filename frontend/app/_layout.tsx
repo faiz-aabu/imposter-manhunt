@@ -3,17 +3,32 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
-import { Stack } from "expo-router";
+import { Stack, usePathname, useRouter } from "expo-router";
 import { useFonts } from "expo-font";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useClassicGameEvents } from "../src/hooks/use-classic-game-events";
 import { colors, spacing, typography } from "../src/theme";
 import { useSocketConnection } from "../src/hooks/use-socket-connection";
+import { getReconnectSession } from "../src/services/player-session";
+import { hasCompletedTutorial } from "../src/services/tutorial-progress";
+import { useTranslation } from "../src/i18n/use-translation";
+import { useLanguageStore } from "../src/services/language-preference";
+import { useRoomStore } from "../src/store/room-store";
+import { shouldShowFirstLaunchTutorial } from "../src/utils/tutorial";
 
 const FONT_LOAD_TIMEOUT_MS = 10_000;
 
 export default function RootLayout() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const t = useTranslation();
   const [fontsLoaded, fontError] = useFonts({
     Inter_500Medium,
     Inter_600SemiBold,
@@ -23,6 +38,53 @@ export default function RootLayout() {
 
   useClassicGameEvents();
   useSocketConnection(true);
+
+  useEffect(() => {
+    void useLanguageStore.getState().hydrate();
+  }, []);
+
+  useEffect(() => {
+    if (!fontsLoaded || pathname !== "/") {
+      return;
+    }
+
+    let active = true;
+    const checkTutorial = async () => {
+      try {
+        const [tutorialCompleted, reconnectSession] = await Promise.all([
+          hasCompletedTutorial(),
+          getReconnectSession(),
+        ]);
+        if (
+          active &&
+          shouldShowFirstLaunchTutorial(
+            tutorialCompleted,
+            reconnectSession !== null,
+            useRoomStore.getState().room !== null,
+          )
+        ) {
+          router.replace({
+            pathname: "/tutorial",
+            params: { returnTo: "/" },
+          });
+        }
+      } catch (error) {
+        if (active) {
+          Alert.alert(
+            t("tutorial.checkErrorTitle"),
+            error instanceof Error
+              ? error.message
+              : t("tutorial.checkErrorFallback"),
+          );
+        }
+      }
+    };
+
+    void checkTutorial();
+    return () => {
+      active = false;
+    };
+  }, [fontsLoaded, pathname, router, t]);
 
   useEffect(() => {
     if (fontsLoaded || fontError) {
@@ -43,6 +105,7 @@ export default function RootLayout() {
         <Stack.Screen name="join" options={{ headerShown: false }} />
         <Stack.Screen name="lobby" options={{ headerShown: false }} />
         <Stack.Screen name="games" options={{ headerShown: false }} />
+        <Stack.Screen name="tutorial" options={{ headerShown: false }} />
         <Stack.Screen
           name="imposter/settings"
           options={{ headerShown: false }}
@@ -73,8 +136,10 @@ export default function RootLayout() {
   if (fontError) {
     return (
       <FontStatusScreen
-        title="Inter could not be loaded"
-        message={`${fontError.message} Restart the app after checking the bundled font assets.`}
+        title={t("shared.font.loadFailureTitle")}
+        message={t("shared.font.loadFailureMessage", {
+          detail: fontError.message,
+        })}
       />
     );
   }
@@ -82,8 +147,8 @@ export default function RootLayout() {
   if (fontLoadTimedOut) {
     return (
       <FontStatusScreen
-        title="Fonts are taking longer than expected"
-        message="Inter has not finished loading. Check the Expo logs and restart the app."
+        title={t("shared.font.timeoutTitle")}
+        message={t("shared.font.timeoutMessage")}
       />
     );
   }
@@ -92,7 +157,7 @@ export default function RootLayout() {
     <FontStatusScreen
       loading
       title="Impostor & Manhunt"
-      message="Loading the app fonts..."
+      message={t("shared.font.loading")}
     />
   );
 }

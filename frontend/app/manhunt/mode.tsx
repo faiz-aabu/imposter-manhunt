@@ -7,9 +7,12 @@ import { colors, spacing, typography } from "../../src/theme";
 import { useState } from "react";
 import { ROOM_EVENTS } from "@impostor/api";
 import { emitWithAcknowledgement } from "../../src/services/socket-requests";
+import { localizeManhuntError } from "../../src/i18n/manhunt-errors";
+import { useTranslation } from "../../src/i18n/use-translation";
 
 export default function ModeRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const setRoom = useRoomStore((state) => state.setRoom);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -50,21 +53,25 @@ export default function ModeRoute() {
       <View style={styles.header}>
         <IconButton
           icon={ArrowLeft}
-          accessibilityLabel="Back"
+          accessibilityLabel={t("manhunt.common.back")}
           onPress={() => router.back()}
         />
       </View>
-      <Text style={styles.title}>Manhunt</Text>
+      <Text style={styles.title}>{t("manhunt.mode.title")}</Text>
       <Text style={styles.subtitle}>
-        Configure the hunter count and circular play area.
+        {t("manhunt.mode.description")}
       </Text>
       <PrimaryButton
-        title="Continue to setup"
+        title={t("manhunt.mode.continue")}
         loading={isSubmitting}
         disabled={!room || isSubmitting}
         onPress={() => void continueToSetup()}
       />
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      {error ? (
+        <Text style={styles.errorText}>
+          {localizeManhuntError(error, t) ?? error}
+        </Text>
+      ) : null}
     </Screen>
   );
 }

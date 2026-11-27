@@ -6,6 +6,7 @@ export { CodeInput } from "./CodeInput";
 export { GameCard } from "./GameCard";
 export { HudPanel } from "./HudPanel";
 export { IconButton } from "./IconButton";
+export { LanguageSelector } from "./LanguageSelector";
 export { MapActionButton } from "./MapActionButton";
 export { MapBanner } from "./MapBanner";
 export { ManhuntBoundaryPreview } from "./ManhuntBoundaryPreview";

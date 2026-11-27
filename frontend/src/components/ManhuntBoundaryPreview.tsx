@@ -15,6 +15,7 @@ import { HudPanel } from "./HudPanel";
 import { IconButton } from "./IconButton";
 import { PrimaryButton } from "./PrimaryButton";
 import { colors, spacing, typography } from "../theme";
+import { useTranslation } from "../i18n/use-translation";
 import {
   createBoundaryCircleGeoJson,
   getBoundaryCircleBounds,
@@ -32,6 +33,7 @@ export function ManhuntBoundaryPreview({
   center,
   radiusMeters,
 }: ManhuntBoundaryPreviewProps) {
+  const t = useTranslation();
   const camera = useRef<CameraRef>(null);
   const [mapStatus, setMapStatus] = useState<MapStatus>("loading");
   const [mapInstance, setMapInstance] = useState(0);
@@ -73,9 +75,11 @@ export function ManhuntBoundaryPreview({
     return (
       <View style={styles.placeholder}>
         <MapPin color={colors.textMuted} size={26} strokeWidth={1.8} />
-        <Text style={styles.placeholderTitle}>Boundary preview</Text>
+        <Text style={styles.placeholderTitle}>
+          {t("manhunt.preview.title")}
+        </Text>
         <Text style={styles.placeholderText}>
-          Select a valid centre with Use my GPS to preview the play area.
+          {t("manhunt.preview.description")}
         </Text>
       </View>
     );
@@ -139,7 +143,9 @@ export function ManhuntBoundaryPreview({
         <View pointerEvents="none" style={styles.loadingOverlay}>
           <HudPanel style={styles.statusPanel}>
             <ActivityIndicator color={colors.teal} />
-            <Text style={styles.statusText}>Loading map preview...</Text>
+            <Text style={styles.statusText}>
+              {t("manhunt.preview.loading")}
+            </Text>
           </HudPanel>
         </View>
       ) : null}
@@ -147,12 +153,14 @@ export function ManhuntBoundaryPreview({
       {mapStatus === "error" ? (
         <View style={styles.errorOverlay}>
           <HudPanel style={styles.statusPanel}>
-            <Text style={styles.errorTitle}>Map preview unavailable</Text>
+            <Text style={styles.errorTitle}>
+              {t("manhunt.preview.unavailable")}
+            </Text>
             <Text style={styles.statusText}>
-              Check your internet connection and retry loading the map.
+              {t("manhunt.preview.error")}
             </Text>
             <PrimaryButton
-              title="Retry map"
+              title={t("manhunt.preview.retry")}
               variant="secondary"
               leftIcon={RefreshCw}
               onPress={() => {
@@ -166,7 +174,7 @@ export function ManhuntBoundaryPreview({
 
       <IconButton
         icon={LocateFixed}
-        accessibilityLabel="Recenter boundary preview"
+        accessibilityLabel={t("manhunt.preview.recenter")}
         disabled={mapStatus !== "ready"}
         onPress={() => setRecenterVersion((current) => current + 1)}
         style={styles.recenterButton}

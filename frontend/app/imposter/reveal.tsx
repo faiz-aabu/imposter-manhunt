@@ -1,6 +1,8 @@
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { useState } from "react";
 import { useRouter } from "expo-router";
 import { Crown, ShieldAlert } from "lucide-react-native";
+import { ROOM_EVENTS } from "@impostor/api";
 import {
   Chip,
   HudPanel,
@@ -13,6 +15,12 @@ import { useClassicGameStore } from "../../src/store/classic-game-store";
 import { useWordGameStore } from "../../src/store/word-game-store";
 import { useConnectionStore } from "../../src/store/connection-store";
 import { useRoomStore } from "../../src/store/room-store";
+import { resetImpostorGameStores } from "../../src/store/reset-impostor-game-stores";
+import { returnFinishedImpostorGameToLobby } from "../../src/services/impostor-rematch";
+import { emitWithAcknowledgement } from "../../src/services/socket-requests";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { localizeImpostorError } from "../../src/i18n/impostor-errors";
+import type { TranslationKey } from "../../src/i18n/locales";
 import { colors, radii, spacing, typography } from "../../src/theme";
 
 const PLAYER_COLORS = [
@@ -26,6 +34,7 @@ const PLAYER_COLORS = [
 
 export default function ImpostorResultsRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const classicSession = useClassicGameStore((state) => state.session);
   const classicResult = useClassicGameStore((state) => state.result);
@@ -33,13 +42,11 @@ export default function ImpostorResultsRoute() {
   const classicPlayersAtStart = useClassicGameStore(
     (state) => state.playersAtStart,
   );
-  const resetClassicGame = useClassicGameStore((state) => state.reset);
   const classicError = useClassicGameStore((state) => state.error);
   const wordSession = useWordGameStore((state) => state.session);
   const wordResult = useWordGameStore((state) => state.result);
   const wordReveal = useWordGameStore((state) => state.reveal);
   const wordPlayersAtStart = useWordGameStore((state) => state.playersAtStart);
-  const resetWordGame = useWordGameStore((state) => state.reset);
   const wordError = useWordGameStore((state) => state.error);
   const isWordSession = wordSession !== null;
   const session = wordSession ?? classicSession;
@@ -49,17 +56,23 @@ export default function ImpostorResultsRoute() {
     : classicPlayersAtStart;
   const error = isWordSession ? wordError : classicError;
   const connectionStatus = useConnectionStore((state) => state.status);
+  const playerId = useRoomStore((state) => state.playerId);
+  const isHost = room?.hostId === playerId;
+  const [isReturning, setIsReturning] = useState(false);
+  const [rematchError, setRematchError] = useState<string | null>(null);
 
   if (!session) {
     return (
       <Screen>
         <View style={styles.centered}>
-          <Text style={styles.title}>Results unavailable</Text>
+          <Text style={styles.title}>
+            {t("impostor.reveal.unavailableTitle")}
+          </Text>
           <Text style={styles.mutedText}>
-            There is no active Impostor game session in this app state.
+            {t("impostor.reveal.unavailableDescription")}
           </Text>
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -79,24 +92,55 @@ export default function ImpostorResultsRoute() {
         players.find((player) => player.id === winnerId)?.nickname,
       )
       .filter((name): name is string => name !== undefined) ?? [];
-  const returnToLobby = () => {
-    resetClassicGame();
-    resetWordGame();
-    router.replace("/lobby");
+  const returnToLobby = async () => {
+    if (
+      !room ||
+      room.code !== session.roomCode ||
+      !isHost ||
+      connectionStatus !== "connected" ||
+      isReturning
+    ) {
+      return;
+    }
+
+    setIsReturning(true);
+    setRematchError(null);
+    const returned = await returnFinishedImpostorGameToLobby({
+      roomCode: session.roomCode,
+      isHost,
+      request: (payload) =>
+        emitWithAcknowledgement({
+          event: ROOM_EVENTS.RETURN_TO_LOBBY,
+          payload,
+        }),
+      onReturned: (updatedRoom) => {
+        useRoomStore.getState().setRoom(updatedRoom);
+        resetImpostorGameStores();
+        router.replace("/lobby");
+      },
+      onError: setRematchError,
+    });
+    if (!returned) {
+      setIsReturning(false);
+    }
   };
 
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={session.roomCode}
-        rightLabel="Result"
-        rightValue={result?.outcome === "win" ? "Complete" : "Final"}
+        rightLabel={t("common.result")}
+        rightValue={
+          result?.outcome === "win"
+            ? t("common.complete")
+            : t("common.final")
+        }
       />
 
       <View style={styles.heading}>
-        <Chip label="Game over" variant="gold" />
-        <Text style={styles.title}>{getResultTitle(result?.outcome)}</Text>
+        <Chip label={t("impostor.reveal.gameOver")} variant="gold" />
+        <Text style={styles.title}>{getResultTitle(result?.outcome, t)}</Text>
         {result?.outcome === "win" && winnerNames.length > 0 ? (
           <View style={styles.winnerLine}>
             <Crown color={colors.gold} size={20} />
@@ -105,12 +149,12 @@ export default function ImpostorResultsRoute() {
         ) : null}
         {result?.outcome === "cancelled" ? (
           <Text style={styles.mutedText}>
-            The server ended the game before a winner was declared.
+            {t("impostor.reveal.cancelledDescription")}
           </Text>
         ) : null}
         {result && result.winnerPlayerIds.length > 0 && winnerNames.length === 0 ? (
           <Text style={styles.mutedText}>
-            The server declared a winner, but their player names are unavailable.
+            {t("impostor.reveal.winnerNamesUnavailable")}
           </Text>
         ) : null}
       </View>
@@ -120,8 +164,8 @@ export default function ImpostorResultsRoute() {
           <ActivityIndicator color={colors.teal} />
           <Text style={styles.mutedText}>
             {!result
-              ? "Waiting for the server to confirm the final result..."
-              : "Waiting for the server's official role reveal..."}
+            ? t("impostor.reveal.waitingResult")
+            : t("impostor.reveal.waitingRoles")}
           </Text>
         </HudPanel>
       ) : (
@@ -129,16 +173,20 @@ export default function ImpostorResultsRoute() {
           <View style={styles.panelHeading}>
             <ShieldAlert color={colors.pink} size={20} />
             <Text style={styles.sectionTitle}>
-              {isWordSession ? "Final word and roles" : "Final roles"}
+              {t(
+                isWordSession
+                  ? "impostor.reveal.wordAndRoles"
+                  : "impostor.reveal.roles",
+              )}
             </Text>
           </View>
           <Text style={styles.mutedText}>
-            These roles are shown after the server's final reveal.
+            {t("impostor.reveal.rolesDescription")}
           </Text>
           {isWordSession && wordReveal ? (
             <View style={styles.wordPanel}>
               <Text style={styles.wordCategory}>
-                {formatCategory(wordReveal.category)}
+                {formatCategory(wordReveal.category, t)}
               </Text>
               <Text style={styles.secretWord}>{wordReveal.secretWord}</Text>
             </View>
@@ -162,10 +210,10 @@ export default function ImpostorResultsRoute() {
                   avatarColor={PLAYER_COLORS[index % PLAYER_COLORS.length]}
                   status={
                     isWordSession && !wordRole
-                      ? "Role unavailable"
+                      ? t("impostor.reveal.roleUnavailable")
                       : isImpostor
-                        ? "Impostor"
-                        : "Civilian"
+                        ? t("impostor.role.impostor")
+                        : t("impostor.role.civilian")
                   }
                 />
               );
@@ -177,40 +225,59 @@ export default function ImpostorResultsRoute() {
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting to restore the complete result..."
-            : "Connection lost. The displayed result is from the last server update."}
+            ? t("impostor.reveal.reconnecting")
+            : t("impostor.reveal.connectionLost")}
         </Text>
       ) : null}
-      {error ? (
+      {error || rematchError ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(rematchError ?? error, t)}
         </Text>
       ) : null}
 
-      <PrimaryButton
-        title="Return to lobby"
-        onPress={returnToLobby}
-      />
+      {isHost ? (
+        <PrimaryButton
+          title={t("impostor.reveal.returnToLobby")}
+          onPress={() => void returnToLobby()}
+          disabled={connectionStatus !== "connected"}
+          loading={isReturning}
+        />
+      ) : (
+        <Text style={styles.mutedText}>
+          {t("impostor.reveal.hostReturns")}
+        </Text>
+      )}
     </Screen>
   );
 }
 
-function formatCategory(category: string): string {
-  return `${category.charAt(0).toUpperCase()}${category.slice(1)}`;
+function formatCategory(
+  category: string,
+  t: ReturnType<typeof useTranslation>,
+): string {
+  const categoryKeys: Record<string, TranslationKey> = {
+    animals: "impostor.setup.category.animals",
+    food: "impostor.setup.category.food",
+    places: "impostor.setup.category.places",
+    objects: "impostor.setup.category.objects",
+  };
+  const key = categoryKeys[category];
+  return key ? t(key) : category;
 }
 
 function getResultTitle(
   outcome: "win" | "draw" | "cancelled" | undefined,
+  t: ReturnType<typeof useTranslation>,
 ): string {
   switch (outcome) {
     case "win":
-      return "The game has a winner";
+      return t("impostor.reveal.gameWinner");
     case "draw":
-      return "The game ended in a draw";
+      return t("impostor.reveal.draw");
     case "cancelled":
-      return "The game was cancelled";
+      return t("impostor.reveal.cancelled");
     default:
-      return "Final results";
+      return t("impostor.reveal.finalResults");
   }
 }
 

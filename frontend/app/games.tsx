@@ -10,15 +10,18 @@ import {
   Chip,
   GameCard,
   IconButton,
+  LanguageSelector,
   PrimaryButton,
   Screen,
   TopHudBar,
 } from "../src/components";
 import { useRoomStore } from "../src/store/room-store";
 import { colors, spacing, typography } from "../src/theme";
+import { useTranslation } from "../src/i18n/use-translation";
 
 export default function GamesRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const playerId = useRoomStore((state) => state.playerId);
 
@@ -31,16 +34,16 @@ export default function GamesRoute() {
       <Screen>
         <View style={styles.permissionScreen}>
           <IconButton
-            accessibilityLabel="Back to lobby"
+            accessibilityLabel={t("games.backAccessibility")}
             icon={ArrowLeft}
             onPress={() => router.replace("/lobby")}
           />
-          <Text style={styles.title}>Host only</Text>
+          <Text style={styles.title}>{t("games.hostOnly")}</Text>
           <Text style={styles.subtitle}>
-            Only the room host can choose a game.
+            {t("games.hostOnlyDescription")}
           </Text>
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -52,34 +55,35 @@ export default function GamesRoute() {
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Players"
+        rightLabel={t("common.players")}
         rightValue={`${room.players.length} / ${room.settings.maxPlayers}`}
         leftValueStyle={typography.roomCode}
         style={styles.topBar}
       />
       <View style={styles.hostChipRow}>
-        <Chip label="Host" variant="gold" />
+        <Chip label={t("games.host")} variant="gold" />
       </View>
 
-      <Text style={styles.title}>What are we playing?</Text>
+      <Text style={styles.title}>{t("games.title")}</Text>
+      <LanguageSelector />
 
       <View style={styles.cards}>
         <GameCard
           icon={Target}
-          title="Manhunt"
-          subtitle="Seekers and hunters chase civilians in real life"
-          chipLabel="GPS map"
+          title={t("games.manhunt")}
+          subtitle={t("games.manhuntDescription")}
+          chipLabel={t("games.gpsMap")}
           chipVariant="pink"
           tileColor={colors.pink}
           onPress={() => router.push("/manhunt/mode")}
         />
         <GameCard
           icon={CircleHelp}
-          title="Classic Imposter"
-          subtitle="No word. Ask questions and spot the liar"
-          chipLabel="Face to face"
+          title={t("games.classic")}
+          subtitle={t("games.classicDescription")}
+          chipLabel={t("games.faceToFace")}
           chipVariant="white"
           tileColor={colors.violet}
           onPress={() =>
@@ -91,9 +95,9 @@ export default function GamesRoute() {
         />
         <GameCard
           icon={CaseSensitive}
-          title="Word Imposter"
-          subtitle="Everyone gets a secret word. One doesn't"
-          chipLabel="Secret word"
+          title={t("games.word")}
+          subtitle={t("games.wordDescription")}
+          chipLabel={t("games.secretWord")}
           chipVariant="teal"
           tileColor={colors.teal}
           onPress={() =>
@@ -106,7 +110,7 @@ export default function GamesRoute() {
       </View>
 
       <PrimaryButton
-        title="Back to lobby"
+        title={t("games.backToLobby")}
         variant="secondary"
         onPress={() => router.replace("/lobby")}
         style={styles.backToLobby}

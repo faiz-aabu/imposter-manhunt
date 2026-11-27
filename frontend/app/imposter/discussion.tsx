@@ -13,6 +13,8 @@ import { useClassicGameStore } from "../../src/store/classic-game-store";
 import { useWordGameStore } from "../../src/store/word-game-store";
 import { useConnectionStore } from "../../src/store/connection-store";
 import { useRoomStore } from "../../src/store/room-store";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { localizeImpostorError } from "../../src/i18n/impostor-errors";
 import { colors, spacing, typography } from "../../src/theme";
 
 const PLAYER_COLORS = [
@@ -26,6 +28,7 @@ const PLAYER_COLORS = [
 
 export default function DiscussionRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const classicSession = useClassicGameStore((state) => state.session);
   const classicState = useClassicGameStore((state) => state.state);
@@ -70,17 +73,19 @@ export default function DiscussionRoute() {
       <Screen>
         <View style={styles.centered}>
           <ActivityIndicator color={colors.teal} />
-          <Text style={styles.title}>Restoring discussion</Text>
+          <Text style={styles.title}>
+            {t("impostor.discussion.restoringTitle")}
+          </Text>
           <Text style={styles.mutedText}>
-            Waiting for the current room and game state from the server.
+            {t("impostor.discussion.restoringDescription")}
           </Text>
           {error ? (
             <Text accessibilityRole="alert" style={styles.error}>
-              {error}
+              {localizeImpostorError(error, t)}
             </Text>
           ) : null}
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -109,34 +114,46 @@ export default function DiscussionRoute() {
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Round"
+        rightLabel={t("common.round")}
         rightValue={`${gameState.roundNumber}`}
       />
 
       <View style={styles.heading}>
         <Chip
-          label={isWordSession ? "Word Impostor" : "Discussion"}
+          label={
+            isWordSession
+              ? t("impostor.mode.word")
+              : t("impostor.discussion.label")
+          }
           variant="teal"
         />
         <Text style={styles.title}>
-          {isWordSession ? "Discuss the word" : "Talk it out"}
+          {t(
+            isWordSession
+              ? "impostor.discussion.wordTitle"
+              : "impostor.discussion.classicTitle",
+          )}
         </Text>
         <Text style={styles.mutedText}>
-          {isWordSession
-            ? "Compare clues and decide who may not know the secret word."
-            : "Ask questions, listen carefully, and decide who seems suspicious."}
+          {t(
+            isWordSession
+              ? "impostor.discussion.wordDescription"
+              : "impostor.discussion.classicDescription",
+          )}
         </Text>
       </View>
 
       {gameState.phase === "discussion" ? (
         <HudPanel style={styles.timerPanel}>
-          <Text style={styles.timerLabel}>Discussion ends in</Text>
+          <Text style={styles.timerLabel}>
+            {t("impostor.discussion.endsIn")}
+          </Text>
           <Text style={styles.timer}>{countdown.label}</Text>
           {countdown.remainingSeconds === 0 ? (
             <Text style={styles.mutedText}>
-              Waiting for the server to open voting...
+              {t("impostor.discussion.waitingVoting")}
             </Text>
           ) : null}
           {isWordSession && voteResults ? (
@@ -153,7 +170,12 @@ export default function DiscussionRoute() {
                   <View key={tally.targetPlayerId} style={styles.tallyRow}>
                     <Text style={styles.mutedText}>{player.nickname}</Text>
                     <Text style={styles.tallyCount}>
-                      {tally.count} {tally.count === 1 ? "vote" : "votes"}
+                      {t(
+                        tally.count === 1
+                          ? "impostor.discussion.voteCountOne"
+                          : "impostor.discussion.voteCountMany",
+                        { count: tally.count },
+                      )}
                     </Text>
                   </View>
                 ) : null;
@@ -163,35 +185,43 @@ export default function DiscussionRoute() {
         </HudPanel>
       ) : (
         <HudPanel style={styles.timerPanel}>
-          <Text style={styles.timerLabel}>Current server phase</Text>
-          <Text style={styles.phaseText}>{phaseLabel(gameState.phase)}</Text>
+          <Text style={styles.timerLabel}>
+            {t("impostor.discussion.currentPhase")}
+          </Text>
+          <Text style={styles.phaseText}>
+            {phaseLabel(gameState.phase, t)}
+          </Text>
         </HudPanel>
       )}
 
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting. The server will restore your game state..."
-            : "Connection lost. Waiting to reconnect..."}
+            ? t("impostor.discussion.reconnecting")
+            : t("impostor.discussion.connectionLost")}
         </Text>
       ) : null}
 
       {voteResults ? (
         <HudPanel style={styles.resultPanel}>
           <Text style={styles.sectionTitle}>
-            Round {resultRound} result
+            {t("impostor.discussion.roundResult", {
+              round: resultRound ?? "",
+            })}
           </Text>
           {eliminatedPlayer ? (
             <Text style={styles.resultText}>
-              {eliminatedPlayer.nickname} was eliminated.
+              {t("impostor.discussion.eliminated", {
+                player: eliminatedPlayer.nickname,
+              })}
             </Text>
           ) : isTie ? (
             <Text style={styles.resultText}>
-              The vote was tied. The server has requested a revote.
+              {t("impostor.discussion.tieRevote")}
             </Text>
           ) : isNoVoteResult ? (
             <Text style={styles.resultText}>
-              No votes were submitted. No player was eliminated.
+              {t("impostor.discussion.noVotes")}
             </Text>
           ) : null}
         </HudPanel>
@@ -199,9 +229,11 @@ export default function DiscussionRoute() {
 
       <HudPanel style={styles.playersPanel}>
         <View style={styles.panelHeading}>
-          <Text style={styles.sectionTitle}>Players</Text>
+          <Text style={styles.sectionTitle}>{t("common.players")}</Text>
           <Chip
-            label={`${room.players.length} in room`}
+          label={t("impostor.discussion.playersInRoom", {
+            count: room.players.length,
+          })}
             variant="muted"
           />
         </View>
@@ -213,10 +245,10 @@ export default function DiscussionRoute() {
               avatarColor={PLAYER_COLORS[index % PLAYER_COLORS.length]}
               status={
                 player.status === "eliminated"
-                  ? "Eliminated"
+                ? t("impostor.discussion.eliminatedStatus")
                   : player.connectionStatus === "connected"
-                    ? "In game"
-                    : "Disconnected"
+                  ? t("impostor.discussion.inGameStatus")
+                  : t("impostor.discussion.disconnectedStatus")
               }
             />
           ))}
@@ -225,23 +257,26 @@ export default function DiscussionRoute() {
 
       {error ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(error, t)}
         </Text>
       ) : null}
     </Screen>
   );
 }
 
-function phaseLabel(phase: string): string {
+function phaseLabel(
+  phase: string,
+  t: ReturnType<typeof useTranslation>,
+): string {
   switch (phase) {
     case "role_reveal":
-      return "Role reveal";
+      return t("impostor.discussion.phaseRoleReveal");
     case "voting":
-      return "Voting";
+      return t("impostor.discussion.phaseVoting");
     case "reveal":
-      return "Final results";
+      return t("impostor.discussion.phaseResults");
     default:
-      return "Discussion";
+      return t("impostor.discussion.label");
   }
 }
 

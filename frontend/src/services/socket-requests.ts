@@ -1,4 +1,5 @@
 import {
+  CLOCK_EVENTS,
   CONNECTION_EVENTS,
   GAME_EVENTS,
   ROOM_EVENTS,
@@ -6,6 +7,7 @@ import {
 } from "@impostor/api";
 import type {
   ClientToServerPayloads,
+  ClockSyncResponsePayload,
   CreateRoomResponse,
   JoinRoomResponse,
   PlayerReconnectedPayload,
@@ -49,17 +51,38 @@ export function emitWithAcknowledgement(
   request: RequestFor<typeof ROOM_EVENTS.UPDATE_SETTINGS>,
 ): Promise<SocketAcknowledgement<RoomUpdatePayload>>;
 export function emitWithAcknowledgement(
+  request: RequestFor<typeof ROOM_EVENTS.RETURN_TO_LOBBY>,
+): Promise<SocketAcknowledgement<RoomUpdatePayload>>;
+export function emitWithAcknowledgement(
   request: RequestFor<typeof CONNECTION_EVENTS.RECONNECT>,
 ): Promise<SocketAcknowledgement<PlayerReconnectedPayload>>;
 export function emitWithAcknowledgement(
   request: RequestFor<typeof GAME_EVENTS.START_GAME>,
 ): Promise<SocketAcknowledgement<void>>;
 export function emitWithAcknowledgement(
+  request: RequestFor<typeof CLOCK_EVENTS.SYNC>,
+): Promise<SocketAcknowledgement<ClockSyncResponsePayload>>;
+export function emitWithAcknowledgement(
   request: RequestFor<typeof MANHUNT_EVENTS.UPDATE_SETTINGS>,
 ): Promise<SocketAcknowledgement<RoomUpdatePayload>>;
 export function emitWithAcknowledgement(
   request: RequestFor<typeof MANHUNT_EVENTS.LOCATION_UPDATE>,
 ): Promise<SocketAcknowledgement<ManhuntLocationAcknowledgementPayload>>;
+export function emitWithAcknowledgement(
+  request: RequestFor<typeof MANHUNT_EVENTS.FREEZE>,
+): Promise<SocketAcknowledgement<void>>;
+export function emitWithAcknowledgement(
+  request: RequestFor<typeof MANHUNT_EVENTS.FOOTSTEPS>,
+): Promise<SocketAcknowledgement<void>>;
+export function emitWithAcknowledgement(
+  request: RequestFor<typeof MANHUNT_EVENTS.SMOKE_BOMB>,
+): Promise<SocketAcknowledgement<void>>;
+export function emitWithAcknowledgement(
+  request: RequestFor<typeof MANHUNT_EVENTS.GHOST>,
+): Promise<SocketAcknowledgement<void>>;
+export function emitWithAcknowledgement(
+  request: RequestFor<typeof MANHUNT_EVENTS.FREEZE_DECOY>,
+): Promise<SocketAcknowledgement<void>>;
 export function emitWithAcknowledgement(
   request: RequestFor<typeof MANHUNT_EVENTS.CATCH_CONFIRMATION_RESPONSE>,
 ): Promise<SocketAcknowledgement<void>>;
@@ -93,6 +116,10 @@ export function emitWithAcknowledgement(
       return sendAcknowledged((acknowledge) =>
         socket.emit(ROOM_EVENTS.UPDATE_SETTINGS, request.payload, acknowledge),
       );
+    case ROOM_EVENTS.RETURN_TO_LOBBY:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(ROOM_EVENTS.RETURN_TO_LOBBY, request.payload, acknowledge),
+      );
     case CONNECTION_EVENTS.RECONNECT:
       return sendAcknowledged((acknowledge) =>
         socket.emit(CONNECTION_EVENTS.RECONNECT, request.payload, acknowledge),
@@ -101,6 +128,10 @@ export function emitWithAcknowledgement(
       return sendAcknowledged((acknowledge) =>
         socket.emit(GAME_EVENTS.START_GAME, request.payload, acknowledge),
       );
+    case CLOCK_EVENTS.SYNC:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(CLOCK_EVENTS.SYNC, request.payload, acknowledge),
+      );
     case MANHUNT_EVENTS.UPDATE_SETTINGS:
       return sendAcknowledged((acknowledge) =>
         socket.emit(MANHUNT_EVENTS.UPDATE_SETTINGS, request.payload, acknowledge),
@@ -108,6 +139,26 @@ export function emitWithAcknowledgement(
     case MANHUNT_EVENTS.LOCATION_UPDATE:
       return sendAcknowledged((acknowledge) =>
         socket.emit(MANHUNT_EVENTS.LOCATION_UPDATE, request.payload, acknowledge),
+      );
+    case MANHUNT_EVENTS.FREEZE:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(MANHUNT_EVENTS.FREEZE, request.payload, acknowledge),
+      );
+    case MANHUNT_EVENTS.FOOTSTEPS:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(MANHUNT_EVENTS.FOOTSTEPS, request.payload, acknowledge),
+      );
+    case MANHUNT_EVENTS.SMOKE_BOMB:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(MANHUNT_EVENTS.SMOKE_BOMB, request.payload, acknowledge),
+      );
+    case MANHUNT_EVENTS.GHOST:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(MANHUNT_EVENTS.GHOST, request.payload, acknowledge),
+      );
+    case MANHUNT_EVENTS.FREEZE_DECOY:
+      return sendAcknowledged((acknowledge) =>
+        socket.emit(MANHUNT_EVENTS.FREEZE_DECOY, request.payload, acknowledge),
       );
     case MANHUNT_EVENTS.CATCH_CONFIRMATION_RESPONSE:
       return sendAcknowledged((acknowledge) =>

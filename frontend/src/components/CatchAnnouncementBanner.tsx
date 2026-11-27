@@ -2,6 +2,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { Target } from "lucide-react-native";
 import type { CatchConfirmedPayload } from "@impostor/api";
 import { colors, radii, spacing, typography } from "../theme";
+import { useTranslation } from "../i18n/use-translation";
 
 interface CatchAnnouncementBannerProps {
   announcement: CatchConfirmedPayload;
@@ -10,12 +11,15 @@ interface CatchAnnouncementBannerProps {
 export function CatchAnnouncementBanner({
   announcement,
 }: CatchAnnouncementBannerProps) {
+  const t = useTranslation();
+
   return (
     <View style={styles.banner}>
       <Target color={colors.pinkMap} size={19} strokeWidth={2} />
       <Text numberOfLines={1} style={styles.message}>
-        <Text style={styles.nickname}>{announcement.caughtNickname}</Text>
-        {" was caught!"}
+        {t("manhunt.map.catchAnnouncement", {
+          nickname: announcement.caughtNickname,
+        })}
       </Text>
     </View>
   );

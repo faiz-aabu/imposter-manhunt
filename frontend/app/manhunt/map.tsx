@@ -3,14 +3,22 @@ import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import * as Haptics from "expo-haptics";
+import * as Crypto from "expo-crypto";
 import {
   ArrowLeft,
   LocateFixed,
+  Navigation,
   RefreshCw,
   Settings,
   Target,
 } from "lucide-react-native";
-import { MANHUNT_EVENTS } from "@impostor/api";
+import {
+  MANHUNT_EVENTS,
+  MANHUNT_FREEZE_DECOY_DURATION_SECONDS,
+  MANHUNT_GHOST_DURATION_SECONDS,
+  MANHUNT_MISSION_DWELL_SECONDS,
+  MANHUNT_SMOKE_BOMB_DURATION_SECONDS,
+} from "@impostor/api";
 import type {
   CatchConfirmationRequestPayload,
   CatchConfirmedPayload,
@@ -30,19 +38,43 @@ import {
 import { useDeviceLocation } from "../../src/hooks/use-device-location";
 import { useManhuntGameStore } from "../../src/store/manhunt-game-store";
 import { useRoomStore } from "../../src/store/room-store";
+import { localizeManhuntError } from "../../src/i18n/manhunt-errors";
+import { useTranslation } from "../../src/i18n/use-translation";
 import { getSocketClient } from "../../src/services/socket-client";
+import { scheduleServerDeadline } from "../../src/services/server-clock-sync";
 import { emitWithAcknowledgement } from "../../src/services/socket-requests";
 import { colors, spacing, typography } from "../../src/theme";
 import { ManhuntCatchAnnouncementQueue } from "../../src/utils/manhunt-catch-announcement-queue";
 import { ManhuntProximityHapticGate } from "../../src/utils/manhunt-proximity-haptics";
+import {
+  EMPTY_MISSION_PROGRESS,
+  formatMissionCountdown,
+  getMissionProgressSeconds,
+  getMissionRevealMessage,
+  getVisibleMissionAssignment,
+  isMissionCircleVisible,
+  updateMissionProgress,
+} from "../../src/utils/manhunt-missions";
+import type { MissionProgressState } from "../../src/utils/manhunt-missions";
+import { getVisibleFreezeDecoys } from "../../src/utils/manhunt-decoys";
+import {
+  getVisibleLateGameClue,
+  getVisibleLateGameWarning,
+} from "../../src/utils/manhunt-late-game-exposure";
 
 type MapLoadStatus = "loading" | "ready" | "error";
 
 export default function MapRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const location = useDeviceLocation();
   const manhunt = useManhuntGameStore();
   const room = useRoomStore((state) => state.room);
+  const playerId = useRoomStore((state) => state.playerId);
+  const manhuntBoundaryRoomCode = useRoomStore(
+    (state) => state.manhuntBoundaryRoomCode,
+  );
+  const manhuntBoundary = useRoomStore((state) => state.manhuntBoundary);
   const [mapStatus, setMapStatus] = useState<MapLoadStatus>("loading");
   const [mapError, setMapError] = useState<string | null>(null);
   const [mapInstance, setMapInstance] = useState(0);
@@ -52,26 +84,42 @@ export default function MapRoute() {
   const [incomingCatchRequest, setIncomingCatchRequest] =
     useState<CatchConfirmationRequestPayload | null>(null);
   const [catchResponseBusy, setCatchResponseBusy] = useState(false);
+  const [footstepsPending, setFootstepsPending] = useState(false);
+  const [smokeBombPending, setSmokeBombPending] = useState(false);
+  const [ghostPending, setGhostPending] = useState(false);
+  const [freezeDecoyPending, setFreezeDecoyPending] = useState(false);
   const [catchResponseError, setCatchResponseError] = useState<string | null>(
     null,
   );
   const [catchAnnouncement, setCatchAnnouncement] =
     useState<CatchConfirmedPayload | null>(null);
+  const [missionProgress, setMissionProgress] =
+    useState<MissionProgressState>(EMPTY_MISSION_PROGRESS);
   const serverTimeOffsetMs = useManhuntGameStore(
     (state) => state.serverTimeOffsetMs,
   );
   const catchResponseBusyRef = useRef(false);
   const lastLocationSentAt = useRef(0);
+  const missionProgressRef = useRef<MissionProgressState>(
+    EMPTY_MISSION_PROGRESS,
+  );
 
   const active =
     manhunt.session !== null &&
     manhunt.gameState?.phase === "active";
-  const boundary = manhunt.gameState?.settings.boundary ??
-    manhunt.session?.state.settings.boundary ??
-    null;
+  const ownPlayerCaught =
+    manhunt.ownPlayerId !== null &&
+    manhunt.caughtPlayerIds.includes(manhunt.ownPlayerId);
+  const runnerHeadStart =
+    manhunt.session !== null &&
+    manhunt.gameState?.phase === "countdown" &&
+    manhunt.ownTeam === "runner";
+  const canSubmitLocation = active || runnerHeadStart;
+  const boundary =
+    manhuntBoundaryRoomCode === room?.code ? manhuntBoundary : null;
 
   useEffect(() => {
-    if (!active || !location.location || !room || !manhunt.session) {
+    if (!canSubmitLocation || !location.location || !room || !manhunt.session) {
       return;
     }
     const now = Date.now();
@@ -94,7 +142,7 @@ export default function MapRoute() {
         clientTimestamp: new Date(location.location.timestamp).toISOString(),
       },
     }).catch(() => undefined);
-  }, [active, location.location, manhunt.session, room]);
+  }, [canSubmitLocation, location.location, manhunt.session, room]);
 
   useEffect(() => {
     if (!active) {
@@ -107,6 +155,13 @@ export default function MapRoute() {
     const socket = getSocketClient();
     const onDisconnect = () => {
       useManhuntGameStore.getState().clearReveal();
+      useManhuntGameStore.getState().clearFreeze();
+      useManhuntGameStore.getState().clearSmokeBombState();
+      useManhuntGameStore.getState().clearGhostState();
+      useManhuntGameStore.getState().clearFreezeDecoyState();
+      useManhuntGameStore.getState().clearFreezeDecoyUsageState();
+      useManhuntGameStore.getState().clearLateGameClueState();
+      useManhuntGameStore.getState().clearLateGameWarningState();
       setSelectedPlayerId(null);
       setIncomingCatchRequest(null);
     };
@@ -114,6 +169,10 @@ export default function MapRoute() {
     return () => {
       socket.off("disconnect", onDisconnect);
       useManhuntGameStore.getState().clearReveal();
+      useManhuntGameStore.getState().clearFreezeDecoyState();
+      useManhuntGameStore.getState().clearFreezeDecoyUsageState();
+      useManhuntGameStore.getState().clearLateGameClueState();
+      useManhuntGameStore.getState().clearLateGameWarningState();
       setSelectedPlayerId(null);
     };
   }, [active]);
@@ -207,37 +266,296 @@ export default function MapRoute() {
     if (!incomingCatchRequest) {
       return;
     }
-    const remainingMs = Math.max(
-      0,
-      Date.parse(incomingCatchRequest.expiresAt) - Date.now(),
+    return scheduleServerDeadline(
+      incomingCatchRequest.expiresAt,
+      serverTimeOffsetMs,
+      () => {
+        setIncomingCatchRequest((current) =>
+          current?.requestId === incomingCatchRequest.requestId ? null : current,
+        );
+      },
     );
-    const timer = setTimeout(() => {
-      setIncomingCatchRequest((current) =>
-        current?.requestId === incomingCatchRequest.requestId ? null : current,
-      );
-    }, remainingMs);
-    return () => clearTimeout(timer);
-  }, [incomingCatchRequest?.requestId]);
+  }, [
+    incomingCatchRequest?.requestId,
+    incomingCatchRequest?.expiresAt,
+    serverTimeOffsetMs,
+  ]);
 
   useEffect(() => {
-    if (!active && !manhunt.reveal) return;
+    if (
+      !active &&
+      !runnerHeadStart &&
+      !manhunt.reveal &&
+      !manhunt.missionReveal &&
+      !manhunt.missionAssignment
+    ) {
+      return;
+    }
     setClockNow(Date.now());
     const timer = setInterval(() => setClockNow(Date.now()), 1_000);
     return () => clearInterval(timer);
-  }, [active, manhunt.reveal?.visibleUntil]);
+  }, [
+    active,
+    runnerHeadStart,
+    manhunt.reveal?.visibleUntil,
+    manhunt.missionReveal?.visibleUntil,
+    manhunt.missionAssignment?.deadlineAt,
+  ]);
 
   const revealVisibleUntil = manhunt.reveal
     ? Date.parse(manhunt.reveal.visibleUntil)
     : 0;
   const now = Math.max(clockNow, Date.now());
+  const missionAssignment = getVisibleMissionAssignment(
+    manhunt.ownTeam,
+    playerId,
+    manhunt.missionAssignment,
+  );
+  const missionDeadlinePassed =
+    missionAssignment?.status === "active" &&
+    !isMissionCircleVisible(missionAssignment, now);
+  const missionCircle =
+    missionAssignment && isMissionCircleVisible(missionAssignment, now)
+      ? {
+          center: missionAssignment.center,
+          radiusMeters: missionAssignment.radiusMeters,
+        }
+      : null;
   const serverNow = now + serverTimeOffsetMs;
+  const activeFootstepsGuidances = (manhunt.footstepsState?.guidances ?? [])
+    .filter((guidance) => Date.parse(guidance.expiresAt) > serverNow);
+  const activeFootstepsGuidance = activeFootstepsGuidances.reduce<
+    (typeof activeFootstepsGuidances)[number] | null
+  >(
+    (latest, guidance) =>
+      !latest || Date.parse(guidance.startedAt) > Date.parse(latest.startedAt)
+        ? guidance
+        : latest,
+    null,
+  );
+  const footstepsDeadline = activeFootstepsGuidance
+    ? Date.parse(activeFootstepsGuidance.expiresAt)
+    : 0;
+  const footstepsRemainingSeconds = Math.max(
+    0,
+    Math.ceil((footstepsDeadline - serverNow) / 1_000),
+  );
+  const activeSmokeEffects = (manhunt.smokeBombState?.activeEffects ?? [])
+    .filter((effect) => Date.parse(effect.expiresAt) > serverNow);
+  const activeSmokeEffect = activeSmokeEffects.reduce<
+    (typeof activeSmokeEffects)[number] | null
+  >(
+    (latest, effect) =>
+      !latest || Date.parse(effect.startedAt) > Date.parse(latest.startedAt)
+        ? effect
+        : latest,
+    null,
+  );
+  const smokeBombDeadline = activeSmokeEffect
+    ? Date.parse(activeSmokeEffect.expiresAt)
+    : 0;
+  const smokeBombRemainingSeconds = Math.max(
+    0,
+    Math.ceil((smokeBombDeadline - serverNow) / 1_000),
+  );
+  const activeGhostEffects = (manhunt.ghostState?.activeEffects ?? []).filter(
+    (effect) => Date.parse(effect.expiresAt) > serverNow,
+  );
+  const ghostDeadline = activeGhostEffects.reduce(
+    (latest, effect) => Math.max(latest, Date.parse(effect.expiresAt)),
+    0,
+  );
+  const ghostRemainingSeconds = Math.max(
+    0,
+    Math.ceil((ghostDeadline - serverNow) / 1_000),
+  );
+  const activeFreezeDecoys =
+    active && manhunt.ownTeam === "hunter"
+      ? getVisibleFreezeDecoys(
+          manhunt.freezeDecoyState?.decoys ?? [],
+          serverNow,
+        )
+      : [];
+  const activeLateGameClue =
+    active && manhunt.ownTeam === "hunter"
+      ? getVisibleLateGameClue(manhunt.lateGameClueState, serverNow)
+      : null;
+  const activeLateGameWarning =
+    active && manhunt.ownTeam === "runner"
+      ? getVisibleLateGameWarning(manhunt.lateGameWarningState, serverNow)
+      : null;
+  const lateGameWarningRemainingSeconds = activeLateGameWarning
+    ? Math.max(
+        0,
+        Math.ceil(
+          (Date.parse(activeLateGameWarning.expiresAt) - serverNow) / 1_000,
+        ),
+      )
+    : 0;
+  useEffect(() => {
+    const clue = activeLateGameClue;
+    if (!clue) {
+      return;
+    }
+    const timer = setTimeout(
+      () =>
+        useManhuntGameStore
+          .getState()
+          .clearLateGameClueState(clue.clueId),
+      Math.max(
+        0,
+        Date.parse(clue.expiresAt) - (Date.now() + serverTimeOffsetMs),
+      ),
+    );
+    return () => clearTimeout(timer);
+  }, [
+    activeLateGameClue?.clueId,
+    activeLateGameClue?.expiresAt,
+    serverTimeOffsetMs,
+  ]);
+  useEffect(() => {
+    const warning = activeLateGameWarning;
+    if (!warning) {
+      return;
+    }
+    const timer = setTimeout(
+      () =>
+        useManhuntGameStore
+          .getState()
+          .clearLateGameWarningState(warning.exposureId),
+      Math.max(
+        0,
+        Date.parse(warning.expiresAt) - (Date.now() + serverTimeOffsetMs),
+      ),
+    );
+    return () => clearTimeout(timer);
+  }, [
+    activeLateGameWarning?.exposureId,
+    activeLateGameWarning?.expiresAt,
+    serverTimeOffsetMs,
+  ]);
+  const freezeDecoyNextExpiryMs = activeFreezeDecoys.reduce(
+    (earliest, decoy) => Math.min(earliest, Date.parse(decoy.expiresAt)),
+    Number.POSITIVE_INFINITY,
+  );
+  useEffect(() => {
+    if (!Number.isFinite(freezeDecoyNextExpiryMs)) {
+      return;
+    }
+    const timer = setTimeout(
+      () => setClockNow(Date.now()),
+      Math.max(
+        0,
+        freezeDecoyNextExpiryMs - (Date.now() + serverTimeOffsetMs),
+      ),
+    );
+    return () => clearTimeout(timer);
+  }, [freezeDecoyNextExpiryMs, serverTimeOffsetMs]);
   const visibleRevealRemaining = Number.isFinite(revealVisibleUntil)
     ? Math.max(0, Math.ceil((revealVisibleUntil - now) / 1_000))
     : 0;
   const revealActive = revealVisibleUntil > now;
-  const revealLocations = revealActive
-    ? manhunt.reveal?.locations ?? []
-    : [];
+  const missionRevealVisibleUntil = manhunt.missionReveal
+    ? Date.parse(manhunt.missionReveal.visibleUntil)
+    : 0;
+  const missionRevealActive = missionRevealVisibleUntil > now;
+  const formattedMissionRevealTime = manhunt.missionReveal
+    ? formatMissionCountdown(manhunt.missionReveal.visibleUntil, now)
+    : "00:00";
+  const missionRevealMessage = getMissionRevealMessage(
+    manhunt.ownTeam,
+    missionRevealActive ? manhunt.missionReveal : null,
+    t,
+  );
+  const revealLocationsByPlayer = new Map(
+    revealActive
+      ? (manhunt.reveal?.locations ?? []).map((entry) => [
+          entry.playerId,
+          entry,
+        ])
+      : [],
+  );
+  if (missionRevealActive && missionRevealMessage) {
+    for (const entry of manhunt.missionReveal?.locations ?? []) {
+      revealLocationsByPlayer.set(entry.playerId, entry);
+    }
+  }
+  const revealLocations = [...revealLocationsByPlayer.values()];
+  const missionProgressSeconds = getMissionProgressSeconds(
+    missionProgress,
+    missionAssignment,
+    now,
+  );
+  const missionProgressPercent = Math.min(
+    100,
+    (missionProgressSeconds / MANHUNT_MISSION_DWELL_SECONDS) * 100,
+  );
+  const freezeDeadline =
+    manhunt.freezeState?.phase === "warning"
+      ? Date.parse(manhunt.freezeState.payload.warningEndsAt)
+      : manhunt.freezeState?.phase === "frozen"
+        ? Date.parse(manhunt.freezeState.payload.frozenUntil)
+        : 0;
+  const freezeRemainingSeconds = Math.max(
+    0,
+    Math.ceil((freezeDeadline - serverNow) / 1_000),
+  );
+
+  useEffect(() => {
+    if (!active || manhunt.ownTeam !== "hunter" || !footstepsDeadline) {
+      return;
+    }
+    const timer = setTimeout(
+      () => setClockNow(Date.now()),
+      Math.max(0, footstepsDeadline - (Date.now() + serverTimeOffsetMs)),
+    );
+    return () => clearTimeout(timer);
+  }, [active, footstepsDeadline, manhunt.ownTeam, serverTimeOffsetMs]);
+
+  useEffect(() => {
+    if (!active || manhunt.ownTeam !== "runner" || !smokeBombDeadline) {
+      return;
+    }
+    const timer = setTimeout(
+      () => setClockNow(Date.now()),
+      Math.max(0, smokeBombDeadline - (Date.now() + serverTimeOffsetMs)),
+    );
+    return () => clearTimeout(timer);
+  }, [active, manhunt.ownTeam, serverTimeOffsetMs, smokeBombDeadline]);
+
+  useEffect(() => {
+    if (!active || manhunt.ownTeam !== "runner" || !ghostDeadline) {
+      return;
+    }
+    const timer = setTimeout(
+      () => setClockNow(Date.now()),
+      Math.max(0, ghostDeadline - (Date.now() + serverTimeOffsetMs)),
+    );
+    return () => clearTimeout(timer);
+  }, [active, ghostDeadline, manhunt.ownTeam, serverTimeOffsetMs]);
+
+  useEffect(() => {
+    missionProgressRef.current = EMPTY_MISSION_PROGRESS;
+    setMissionProgress(EMPTY_MISSION_PROGRESS);
+  }, [
+    missionAssignment?.sessionId,
+    missionAssignment?.playerId,
+    missionAssignment?.revealedAt,
+    missionAssignment?.status,
+  ]);
+
+  useEffect(() => {
+    const updated = updateMissionProgress(
+      missionProgressRef.current,
+      missionAssignment,
+      location.location,
+      Date.now(),
+    );
+    if (updated !== missionProgressRef.current) {
+      missionProgressRef.current = updated;
+      setMissionProgress(updated);
+    }
+  }, [location.location, missionAssignment]);
   const formattedRevealTime = `00:${String(visibleRevealRemaining).padStart(2, "0")}`;
   const gameEndsAt = manhunt.gameState?.gameEndsAt
     ? Date.parse(manhunt.gameState.gameEndsAt)
@@ -255,6 +573,18 @@ export default function MapRoute() {
     shrinkWarningEndsAt > serverNow
     ? Math.max(0, Math.ceil((shrinkWarningEndsAt - serverNow) / 1_000))
     : 0;
+  const runnerHeadStartEndsAt = manhunt.gameState?.runnerHeadStartEndsAt
+    ? Date.parse(manhunt.gameState.runnerHeadStartEndsAt)
+    : Number.NaN;
+  const runnerHeadStartRemaining = runnerHeadStart && Number.isFinite(runnerHeadStartEndsAt)
+    ? Math.max(0, Math.ceil((runnerHeadStartEndsAt - serverNow) / 1_000))
+    : null;
+  const hunterReleaseAt = manhunt.gameState?.countdownEndsAt
+    ? Date.parse(manhunt.gameState.countdownEndsAt)
+    : Number.NaN;
+  const hunterReleaseRemaining = runnerHeadStart && Number.isFinite(hunterReleaseAt)
+    ? Math.max(0, Math.ceil((hunterReleaseAt - serverNow) / 1_000))
+    : null;
 
   const attemptCatch = () => {
     if (
@@ -268,8 +598,7 @@ export default function MapRoute() {
     const target = revealLocations.find(
       (entry) => entry.playerId === selectedPlayerId,
     );
-    if (!target || target.team !== "runner" ||
-      target.status === "caught" ||
+    if (!target || target.status === "caught" ||
       manhunt.caughtPlayerIds.includes(target.playerId)) {
       useManhuntGameStore
         .getState()
@@ -289,8 +618,158 @@ export default function MapRoute() {
       manhunt.setError(
         error instanceof Error
           ? error.message
-          : "Could not submit the catch.",
+          : t("manhunt.error.catchSubmit"),
       );
+    }
+  };
+
+  const activateFootsteps = async () => {
+    if (
+      !active ||
+      manhunt.ownTeam !== "hunter" ||
+      !room ||
+      !manhunt.session ||
+      !manhunt.footstepsState ||
+      manhunt.footstepsState.remainingUses <= 0 ||
+      footstepsPending
+    ) {
+      return;
+    }
+    setFootstepsPending(true);
+    try {
+      const response = await emitWithAcknowledgement({
+        event: MANHUNT_EVENTS.FOOTSTEPS,
+        payload: {
+          roomCode: room.code,
+          sessionId: manhunt.session.id,
+          requestId: Crypto.randomUUID(),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(response.error.message);
+      }
+      manhunt.setError(null);
+    } catch (error) {
+      manhunt.setError(
+        error instanceof Error
+        ? error.message
+        : "Could not activate Footsteps.",
+      );
+    } finally {
+      setFootstepsPending(false);
+    }
+  };
+
+  const activateSmokeBomb = async () => {
+    if (
+      !active ||
+      manhunt.ownTeam !== "runner" ||
+      !room ||
+      !manhunt.session ||
+      !manhunt.smokeBombState ||
+      manhunt.smokeBombState.remainingUses <= 0 ||
+      smokeBombPending
+    ) {
+      return;
+    }
+    setSmokeBombPending(true);
+    try {
+      const response = await emitWithAcknowledgement({
+        event: MANHUNT_EVENTS.SMOKE_BOMB,
+        payload: {
+          roomCode: room.code,
+          sessionId: manhunt.session.id,
+          requestId: Crypto.randomUUID(),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(response.error.message);
+      }
+      manhunt.setError(null);
+    } catch (error) {
+      manhunt.setError(
+        error instanceof Error
+        ? error.message
+        : "Could not activate Smoke Bomb.",
+      );
+    } finally {
+      setSmokeBombPending(false);
+    }
+  };
+
+  const activateGhost = async () => {
+    if (
+      !active ||
+      manhunt.ownTeam !== "runner" ||
+      !room ||
+      !manhunt.session ||
+      !manhunt.ghostState ||
+      manhunt.ghostState.usageLimit === null ||
+      manhunt.ghostState.remainingUses === null ||
+      manhunt.ghostState.remainingUses <= 0 ||
+      ghostPending
+    ) {
+      return;
+    }
+    setGhostPending(true);
+    try {
+      const response = await emitWithAcknowledgement({
+        event: MANHUNT_EVENTS.GHOST,
+        payload: {
+          roomCode: room.code,
+          sessionId: manhunt.session.id,
+          requestId: Crypto.randomUUID(),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(response.error.message);
+      }
+      manhunt.setError(null);
+    } catch (error) {
+      manhunt.setError(
+        error instanceof Error
+          ? error.message
+          : "Could not activate Ghost.",
+      );
+    } finally {
+      setGhostPending(false);
+    }
+  };
+
+  const activateFreezeDecoy = async () => {
+    if (
+      !active ||
+      manhunt.ownTeam !== "runner" ||
+      !room ||
+      !manhunt.session ||
+      !manhunt.freezeDecoyUsageState ||
+      manhunt.freezeDecoyUsageState.remainingUses <= 0 ||
+      freezeDecoyPending
+    ) {
+      return;
+    }
+    setFreezeDecoyPending(true);
+    try {
+      const response = await emitWithAcknowledgement({
+        event: MANHUNT_EVENTS.FREEZE_DECOY,
+        payload: {
+          roomCode: room.code,
+          sessionId: manhunt.session.id,
+          requestId: Crypto.randomUUID(),
+        },
+      });
+      if (!response.ok) {
+        throw new Error(response.error.message);
+      }
+      manhunt.setError(null);
+    } catch (error) {
+      manhunt.setError(
+        error instanceof Error
+          ? error.message
+          : "Could not activate Freeze Decoy.",
+      );
+    } finally {
+      setFreezeDecoyPending(false);
     }
   };
 
@@ -342,7 +821,10 @@ export default function MapRoute() {
         location={location.location}
         recenterVersion={recenterVersion}
         boundary={boundary}
+        missionCircle={missionCircle}
         revealedLocations={revealLocations}
+        decoyLocations={activeFreezeDecoys}
+        lateGameClue={activeLateGameClue}
         caughtPlayerIds={manhunt.caughtPlayerIds}
         selectedPlayerId={selectedPlayerId}
         onMarkerPress={(playerId) => {
@@ -367,22 +849,76 @@ export default function MapRoute() {
         <View style={styles.topContent}>
           <TopHudBar
             style={styles.topHud}
-            leftLabel="Manhunt"
-            leftValue={manhunt.ownTeam ? manhunt.ownTeam.toUpperCase() : "TEAM"}
-            rightLabel="Game"
+            leftLabel={t("manhunt.mode.title")}
+            leftValue={
+              manhunt.ownTeam
+                ? t(
+                    manhunt.ownTeam === "hunter"
+                      ? "manhunt.team.hunter"
+                      : "manhunt.team.runner",
+                  ).toUpperCase()
+                : t("manhunt.map.team").toUpperCase()
+            }
+            rightLabel={t("manhunt.map.game")}
             rightValue={formattedGameTime}
           />
           {shrinkCountdownRemaining > 0 ? (
             <MapBanner
-              message="Safe zone shrinking in"
+              message={t("manhunt.map.safeZoneShrinking")}
               timer={`${shrinkCountdownRemaining}s`}
               style={styles.revealBanner}
             />
           ) : null}
+          {runnerHeadStart ? (
+            <HudPanel style={styles.headStartPanel}>
+              <Text style={styles.headStartTitle}>
+                {runnerHeadStartRemaining === null
+                  ? t("manhunt.map.syncingRunnerCountdown")
+                  : runnerHeadStartRemaining > 0
+                    ? t("manhunt.map.run")
+                    : t("manhunt.map.headStartComplete")}
+              </Text>
+              {runnerHeadStartRemaining !== null &&
+              runnerHeadStartRemaining > 0 ? (
+                <Text style={styles.headStartCountdown}>
+                  {runnerHeadStartRemaining}
+                </Text>
+              ) : null}
+              {runnerHeadStartRemaining === 0 &&
+              hunterReleaseRemaining !== null ? (
+                <Text style={styles.statusMessage}>
+                  {t("manhunt.map.hunterRelease", {
+                    seconds: hunterReleaseRemaining,
+                  })}
+                </Text>
+              ) : null}
+            </HudPanel>
+          ) : null}
+          {manhunt.huntStartedAnnouncement ? (
+            <HudPanel style={styles.huntStartedPanel}>
+              <Text style={styles.huntStartedText}>
+                {t("manhunt.map.huntStarted")}
+              </Text>
+            </HudPanel>
+          ) : null}
           {revealActive ? (
             <MapBanner
-              message="Location reveal active"
+              message={t("manhunt.map.locationReveal")}
               timer={formattedRevealTime}
+              style={styles.revealBanner}
+            />
+          ) : null}
+          {missionRevealActive ? (
+            <MapBanner
+              message={missionRevealMessage ?? t("manhunt.map.missionReveal")}
+              timer={formattedMissionRevealTime}
+              style={styles.revealBanner}
+            />
+          ) : null}
+          {activeLateGameWarning ? (
+            <MapBanner
+              message={t("manhunt.map.lastKnownExposed")}
+              timer={`${lateGameWarningRemainingSeconds}s`}
               style={styles.revealBanner}
             />
           ) : null}
@@ -394,17 +930,23 @@ export default function MapRoute() {
         {mapStatus === "loading" ? (
           <View pointerEvents="none" style={styles.mapLoading}>
             <ActivityIndicator color={colors.teal} />
-            <Text style={styles.mapLoadingText}>Loading map...</Text>
+            <Text style={styles.mapLoadingText}>
+              {t("manhunt.map.loading")}
+            </Text>
           </View>
         ) : null}
 
         <View style={styles.bottomContent}>
           {mapStatus === "error" ? (
             <HudPanel style={styles.statusPanel}>
-              <Text style={styles.statusTitle}>Map unavailable</Text>
-              <Text style={styles.statusMessage}>{mapError}</Text>
+              <Text style={styles.statusTitle}>
+                {t("manhunt.map.unavailable")}
+              </Text>
+              <Text style={styles.statusMessage}>
+                {localizeManhuntError(mapError, t) ?? mapError}
+              </Text>
               <PrimaryButton
-                title="Retry map"
+                title={t("manhunt.map.retry")}
                 leftIcon={RefreshCw}
                 onPress={() => {
                   setMapError(null);
@@ -417,7 +959,9 @@ export default function MapRoute() {
 
           {manhunt.error ? (
             <HudPanel style={styles.statusPanel}>
-              <Text style={styles.statusMessage}>{manhunt.error}</Text>
+              <Text style={styles.statusMessage}>
+                {localizeManhuntError(manhunt.error, t) ?? manhunt.error}
+              </Text>
             </HudPanel>
           ) : null}
 
@@ -425,7 +969,7 @@ export default function MapRoute() {
           manhunt.catchRequestStatus?.status ? (
             <HudPanel style={styles.statusPanel}>
               <Text style={styles.statusMessage}>
-                {catchRequestStatusMessage(manhunt.catchRequestStatus.status)}
+                {catchRequestStatusMessage(manhunt.catchRequestStatus.status, t)}
               </Text>
             </HudPanel>
           ) : null}
@@ -435,10 +979,10 @@ export default function MapRoute() {
               <PrimaryButton
                 title={
                   manhunt.catchPending
-                    ? "Waiting for runner confirmation"
+                    ? t("manhunt.map.catchWaiting")
                     : selectedPlayerId
-                      ? "Request catch confirmation"
-                      : "Select a runner marker"
+                      ? t("manhunt.map.catchRequest")
+                      : t("manhunt.map.catchSelect")
                 }
                 leftIcon={Target}
                 loading={manhunt.catchPending}
@@ -450,20 +994,295 @@ export default function MapRoute() {
                 onPress={attemptCatch}
               />
               <Text style={styles.catchHint}>
-                Catch requests require 1.5 m proximity and runner confirmation.
+                {t("manhunt.map.catchHint")}
               </Text>
             </View>
+          ) : missionAssignment ? (
+            <HudPanel
+              highlightColor={colors.gold}
+              style={styles.missionPanel}
+            >
+              <View style={styles.missionHeader}>
+                <Target color={colors.gold} size={20} />
+                <Text style={styles.missionTitle}>
+                  {t("manhunt.map.missionTitle")}
+                </Text>
+                {missionAssignment.status === "active" &&
+                !missionDeadlinePassed ? (
+                  <Text style={styles.missionDeadline}>
+                    {formatMissionCountdown(missionAssignment.deadlineAt, now)}
+                  </Text>
+                ) : null}
+              </View>
+              {missionAssignment.status === "active" ? (
+                missionDeadlinePassed ? (
+                  <Text style={styles.statusMessage}>
+                    {t("manhunt.map.missionDeadlinePassed")}
+                  </Text>
+                ) : (
+                  <>
+                    <Text style={styles.statusMessage}>
+                      {t("manhunt.map.missionInstructions", {
+                        seconds: MANHUNT_MISSION_DWELL_SECONDS,
+                      })}
+                    </Text>
+                    <View style={styles.missionProgressRow}>
+                      <Text style={styles.missionProgressLabel}>
+                        {t("manhunt.map.missionTimeInside")}
+                      </Text>
+                      <Text style={styles.missionProgressValue}>
+                        {missionProgressSeconds.toFixed(1)} /{" "}
+                        {MANHUNT_MISSION_DWELL_SECONDS}s
+                      </Text>
+                    </View>
+                    <View
+                      accessibilityRole="progressbar"
+                      accessibilityLabel={t(
+                        "manhunt.map.missionTimeAccessibility",
+                      )}
+                      accessibilityValue={{
+                        min: 0,
+                        max: MANHUNT_MISSION_DWELL_SECONDS,
+                        now: missionProgressSeconds,
+                      }}
+                      style={styles.missionProgressTrack}
+                    >
+                      <View
+                        style={[
+                          styles.missionProgressFill,
+                          { width: `${missionProgressPercent}%` },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.missionDeadlineHint}>
+                      {t("manhunt.map.missionDeadlineIn")}{" "}
+                      {formatMissionCountdown(
+                        missionAssignment.deadlineAt,
+                        now,
+                      )}
+                    </Text>
+                  </>
+                )
+              ) : (
+                <Text style={styles.statusMessage}>
+                  {missionAssignment.status === "completed"
+                    ? t("manhunt.map.missionCompleteWaiting")
+                    : missionAssignment.status === "failed"
+                      ? t("manhunt.map.missionDeadlineExpired")
+                      : t("manhunt.map.missionEnded")}
+                </Text>
+              )}
+            </HudPanel>
           ) : (
             <HudPanel style={styles.statusPanel}>
-              <Text style={styles.statusTitle}>Runner</Text>
+              <Text style={styles.statusTitle}>
+                {t("manhunt.map.runnerTitle")}
+              </Text>
               <Text style={styles.statusMessage}>
-                Your location is private except during server reveal windows.
+                {t("manhunt.map.runnerPrivacy")}
               </Text>
             </HudPanel>
           )}
 
+          {manhunt.ownTeam === "runner" && manhunt.freezeState && (
+            <HudPanel style={styles.statusPanel}>
+              <Text style={styles.statusTitle}>
+                {manhunt.freezeState.phase === "warning"
+                  ? t("manhunt.map.freezeWarning")
+                  : t("manhunt.map.frozen")}
+              </Text>
+              <Text style={styles.statusMessage}>
+                {manhunt.freezeState.phase === "warning"
+                  ? t("manhunt.map.freezeTakesEffect", {
+                      seconds: freezeRemainingSeconds,
+                    })
+                  : t("manhunt.map.movementPaused", {
+                      seconds: freezeRemainingSeconds,
+                    })}
+              </Text>
+            </HudPanel>
+          )}
+
+          {active &&
+            manhunt.ownTeam === "runner" &&
+            !ownPlayerCaught && (
+            <>
+              <HudPanel style={styles.statusPanel}>
+                <Text style={styles.statusTitle}>
+                  {t("manhunt.map.ability.freezeDecoy")}
+                </Text>
+                <Text style={styles.statusMessage}>
+                  {manhunt.freezeDecoyUsageState
+                    ? t("manhunt.map.ability.usesRemaining", {
+                        count: manhunt.freezeDecoyUsageState.remainingUses,
+                      })
+                    : t("manhunt.map.ability.syncUses")}
+                </Text>
+                <Text style={styles.statusMessage}>
+                  {t("manhunt.map.ability.freezeDecoyDescription", {
+                    seconds: MANHUNT_FREEZE_DECOY_DURATION_SECONDS,
+                  })}
+                </Text>
+              </HudPanel>
+              <PrimaryButton
+                title={
+                  freezeDecoyPending
+                    ? t("manhunt.map.ability.activateFreezeDecoy")
+                    : manhunt.freezeDecoyUsageState?.remainingUses === 0
+                      ? t("manhunt.map.ability.noFreezeDecoyUses")
+                      : t("manhunt.map.ability.useFreezeDecoy")
+                }
+                variant="secondary"
+                disabled={
+                  freezeDecoyPending ||
+                  !manhunt.freezeDecoyUsageState ||
+                  manhunt.freezeDecoyUsageState.remainingUses === 0
+                }
+                onPress={() => void activateFreezeDecoy()}
+              />
+              <HudPanel style={styles.statusPanel}>
+                <Text style={styles.statusTitle}>
+                  {t("manhunt.map.ability.smokeBomb")}
+                </Text>
+                <Text style={styles.statusMessage}>
+                  {manhunt.smokeBombState
+                    ? t("manhunt.map.ability.usesRemaining", {
+                        count: manhunt.smokeBombState.remainingUses,
+                      })
+                    : t("manhunt.map.ability.syncUses")}
+                </Text>
+                {activeSmokeEffect && (
+                  <Text style={styles.statusMessage}>
+                    {t("manhunt.map.ability.smokeBombActive", {
+                      seconds: smokeBombRemainingSeconds,
+                    })}
+                  </Text>
+                )}
+              </HudPanel>
+              <PrimaryButton
+                title={
+                  smokeBombPending
+                    ? t("manhunt.map.ability.activateSmokeBomb")
+                    : manhunt.smokeBombState?.remainingUses === 0
+                      ? t("manhunt.map.ability.noSmokeBombUses")
+                      : t("manhunt.map.ability.useSmokeBomb")
+                }
+                variant="secondary"
+                disabled={
+                  smokeBombPending ||
+                  !manhunt.smokeBombState ||
+                  manhunt.smokeBombState.remainingUses === 0
+                }
+                onPress={() => void activateSmokeBomb()}
+              />
+              <HudPanel style={styles.statusPanel}>
+                <Text style={styles.statusTitle}>
+                  {t("manhunt.map.ability.ghost")}
+                </Text>
+                <Text style={styles.statusMessage}>
+                  {!manhunt.ghostState
+                    ? t("manhunt.map.ability.syncStatus")
+                    : manhunt.ghostState.usageLimit === null
+                      ? t("manhunt.map.ability.ghostUnavailableDescription")
+                      : t("manhunt.map.ability.ghostAvailableDescription", {
+                          seconds: MANHUNT_GHOST_DURATION_SECONDS,
+                          count: manhunt.ghostState.remainingUses ?? 0,
+                        })}
+                </Text>
+                {ghostDeadline > serverNow && (
+                  <Text style={styles.statusMessage}>
+                    {t("manhunt.map.ability.smokeBombActive", {
+                      seconds: ghostRemainingSeconds,
+                    })}
+                  </Text>
+                )}
+              </HudPanel>
+              <PrimaryButton
+                title={
+                  ghostPending
+                    ? t("manhunt.map.ability.activateGhost")
+                    : !manhunt.ghostState
+                      ? t("manhunt.map.ability.syncGhost")
+                      : manhunt.ghostState.usageLimit === null
+                        ? t("manhunt.map.ability.ghostUnavailable")
+                        : manhunt.ghostState.remainingUses === 0
+                          ? t("manhunt.map.ability.noGhostUses")
+                          : t("manhunt.map.ability.useGhost")
+                }
+                variant="secondary"
+                disabled={
+                  ghostPending ||
+                  !manhunt.ghostState ||
+                  manhunt.ghostState.usageLimit === null ||
+                  manhunt.ghostState.remainingUses === null ||
+                  manhunt.ghostState.remainingUses === 0
+                }
+                onPress={() => void activateGhost()}
+              />
+            </>
+          )}
+
+          {active && manhunt.ownTeam === "hunter" && (
+            <>
+              <HudPanel style={styles.statusPanel}>
+                <Text style={styles.statusTitle}>
+                  {t("manhunt.map.ability.footsteps")}
+                </Text>
+                <Text style={styles.statusMessage}>
+                  {manhunt.footstepsState
+                    ? t("manhunt.map.ability.usesRemaining", {
+                        count: manhunt.footstepsState.remainingUses,
+                      })
+                    : t("manhunt.map.ability.syncUses")}
+                </Text>
+                {activeFootstepsGuidance && (
+                  <View style={styles.directionRow}>
+                    <Navigation
+                      size={24}
+                      color={colors.teal}
+                      style={{
+                        transform: [
+                          { rotate: `${activeFootstepsGuidance.bearingDegrees}deg` },
+                        ],
+                      }}
+                    />
+                    <View>
+                      <Text style={styles.statusTitle}>
+                        {formatCompassDirection(
+                          activeFootstepsGuidance.bearingDegrees,
+                          t,
+                        )}
+                      </Text>
+                      <Text style={styles.statusMessage}>
+                        {t("manhunt.map.ability.guidanceEnds", {
+                          seconds: footstepsRemainingSeconds,
+                        })}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+              </HudPanel>
+              <PrimaryButton
+                title={
+                  footstepsPending
+                    ? t("manhunt.map.ability.activateFootsteps")
+                    : manhunt.footstepsState?.remainingUses === 0
+                      ? t("manhunt.map.ability.noFootstepsUses")
+                      : t("manhunt.map.ability.useFootsteps")
+                }
+                variant="secondary"
+                disabled={
+                  footstepsPending ||
+                  !manhunt.footstepsState ||
+                  manhunt.footstepsState.remainingUses === 0
+                }
+                onPress={() => void activateFootsteps()}
+              />
+            </>
+          )}
+
           <PrimaryButton
-            title="Freeze unavailable"
+            title={t("manhunt.map.ability.freezeUnavailable")}
             variant="secondary"
             disabled
             onPress={() => undefined}
@@ -472,19 +1291,19 @@ export default function MapRoute() {
           <View style={styles.mapControls}>
             <IconButton
               icon={ArrowLeft}
-              accessibilityLabel="Back"
+              accessibilityLabel={t("manhunt.common.back")}
               onPress={() => router.back()}
             />
             <IconButton
               icon={LocateFixed}
-              accessibilityLabel="Recenter"
+              accessibilityLabel={t("manhunt.map.recenter")}
               disabled={!location.location || mapStatus !== "ready"}
               iconColor={colors.teal}
               onPress={() => setRecenterVersion((value) => value + 1)}
             />
             <IconButton
               icon={Settings}
-              accessibilityLabel="Location settings"
+              accessibilityLabel={t("manhunt.map.locationSettings")}
               onPress={() => void location.openAppSettings()}
             />
           </View>
@@ -493,7 +1312,7 @@ export default function MapRoute() {
       <ManhuntCatchConfirmationModal
         request={incomingCatchRequest}
         busy={catchResponseBusy}
-        error={catchResponseError}
+        error={localizeManhuntError(catchResponseError, t)}
         onAccept={() => void respondToCatch(true)}
         onReject={() => void respondToCatch(false)}
       />
@@ -505,18 +1324,19 @@ function catchRequestStatusMessage(
   status: NonNullable<
     ReturnType<typeof useManhuntGameStore.getState>["catchRequestStatus"]
   >["status"],
+  t: ReturnType<typeof useTranslation>,
 ): string {
   switch (status) {
     case "pending":
-      return "Waiting for the runner to confirm the catch.";
+      return t("manhunt.map.catchStatus.pending");
     case "rejected":
-      return "The runner rejected the catch request.";
+      return t("manhunt.map.catchStatus.rejected");
     case "expired":
-      return "The catch request expired without a catch.";
+      return t("manhunt.map.catchStatus.expired");
     case "cancelled":
-      return "The catch request was cancelled.";
+      return t("manhunt.map.catchStatus.cancelled");
     case "accepted":
-      return "The runner accepted the catch.";
+      return t("manhunt.map.catchStatus.accepted");
   }
 }
 
@@ -536,6 +1356,33 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.md,
     marginTop: spacing.sm,
   },
+  headStartPanel: {
+    alignItems: "center",
+    gap: spacing.xs,
+    marginHorizontal: spacing.md,
+    borderColor: colors.green,
+    borderWidth: 2,
+  },
+  headStartTitle: {
+    ...typography.headline,
+    color: colors.green,
+    textAlign: "center",
+  },
+  headStartCountdown: {
+    ...typography.title,
+    color: colors.text,
+    fontVariant: ["tabular-nums"],
+  },
+  huntStartedPanel: {
+    alignItems: "center",
+    marginHorizontal: spacing.md,
+    backgroundColor: colors.pink,
+  },
+  huntStartedText: {
+    ...typography.headline,
+    color: colors.textOnAccent,
+    textAlign: "center",
+  },
   mapLoading: {
     alignSelf: "center",
     marginTop: spacing.xxl,
@@ -554,8 +1401,61 @@ const styles = StyleSheet.create({
   statusPanel: {
     gap: spacing.sm,
   },
+  directionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
   catchAction: {
     gap: spacing.xs,
+  },
+  missionPanel: {
+    gap: spacing.sm,
+    borderColor: colors.gold,
+    borderWidth: 2,
+  },
+  missionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+  },
+  missionTitle: {
+    ...typography.body,
+    color: colors.gold,
+    flex: 1,
+  },
+  missionDeadline: {
+    ...typography.small,
+    color: colors.gold,
+    fontVariant: ["tabular-nums"],
+  },
+  missionProgressRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  missionProgressLabel: {
+    ...typography.small,
+    color: colors.textMuted,
+  },
+  missionProgressValue: {
+    ...typography.small,
+    color: colors.gold,
+    fontVariant: ["tabular-nums"],
+  },
+  missionProgressTrack: {
+    height: 8,
+    borderRadius: 4,
+    overflow: "hidden",
+    backgroundColor: colors.panelRaised,
+  },
+  missionProgressFill: {
+    height: "100%",
+    backgroundColor: colors.gold,
+  },
+  missionDeadlineHint: {
+    ...typography.small,
+    color: colors.textMuted,
   },
   catchHint: {
     ...typography.small,
@@ -575,3 +1475,20 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
 });
+
+function formatCompassDirection(
+  bearingDegrees: number,
+  t: ReturnType<typeof useTranslation>,
+): string {
+  const directions = [
+    "manhunt.map.compass.north",
+    "manhunt.map.compass.northeast",
+    "manhunt.map.compass.east",
+    "manhunt.map.compass.southeast",
+    "manhunt.map.compass.south",
+    "manhunt.map.compass.southwest",
+    "manhunt.map.compass.west",
+    "manhunt.map.compass.northwest",
+  ] as const;
+  return t(directions[Math.round(bearingDegrees / 45) % directions.length]!);
+}

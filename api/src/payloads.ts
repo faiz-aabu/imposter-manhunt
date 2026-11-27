@@ -1,4 +1,5 @@
 import {
+  CLOCK_EVENTS,
   CONNECTION_EVENTS,
   ERROR_EVENTS,
   GAME_EVENTS,
@@ -13,6 +14,8 @@ import type {
   GameSession,
   GameSessionId,
   ISODateString,
+  ManhuntBoundary,
+  ManhuntPublicSettings,
   Player,
   PlayerId,
   PublicGameState,
@@ -40,6 +43,10 @@ export interface LeaveRoomPayload {
 export interface UpdateRoomSettingsPayload {
   roomCode: RoomCode;
   settings: RoomSettings;
+}
+
+export interface ReturnToLobbyPayload {
+  roomCode: RoomCode;
 }
 
 export interface RoleRequestPayload {
@@ -83,6 +90,15 @@ export interface DisconnectPayload {
   reason: string;
 }
 
+export interface ClockSyncPayload {
+  requestId: number;
+}
+
+export interface ClockSyncResponsePayload {
+  requestId: number;
+  serverTime: ISODateString;
+}
+
 export interface PlayerReconnectedPayload {
   roomCode: RoomCode;
   player: Player;
@@ -123,6 +139,9 @@ export interface DiscussionPayload {
 
 export interface VoteSubmissionPayload {
   roomCode: RoomCode;
+  sessionId: GameSessionId;
+  votingEndsAt: ISODateString;
+  votingPhaseId: number;
   targetPlayerId: PlayerId;
 }
 
@@ -188,12 +207,18 @@ export interface ManhuntUpdateSettingsPayload {
 
 export interface ManhuntSettingsUpdatePayload {
   roomCode: RoomCode;
-  settings: import("./types/index.js").ManhuntSettings;
+  settings: ManhuntPublicSettings;
+}
+
+export interface ManhuntBoundaryUpdatePayload {
+  roomCode: RoomCode;
+  boundary: ManhuntBoundary | null;
 }
 
 export interface ManhuntTeamAssignmentPayload {
   sessionId: GameSessionId;
-  assignments: import("./types/index.js").ManhuntTeamAssignment[];
+  playerId: PlayerId;
+  team: import("./types/index.js").ManhuntTeam;
 }
 
 export interface ManhuntReadyUpdatePayload {
@@ -210,12 +235,28 @@ export interface ManhuntLocationAcknowledgementPayload {
 export interface RevealedLocation {
   playerId: PlayerId;
   coordinates: Coordinates;
-  team: import("./types/index.js").ManhuntTeam;
   status: import("./types/index.js").PlayerStatus;
 }
 
 export interface LocationFlashPayload {
   sessionId: GameSessionId;
+  locations: RevealedLocation[];
+  visibleUntil: ISODateString;
+}
+
+export interface ManhuntMissionAssignmentPayload {
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  center: Coordinates;
+  radiusMeters: 5;
+  revealedAt: ISODateString;
+  deadlineAt: ISODateString;
+  status: "active" | "completed" | "failed" | "cancelled";
+}
+
+export interface ManhuntMissionRevealPayload {
+  sessionId: GameSessionId;
+  outcome: "success" | "failure";
   locations: RevealedLocation[];
   visibleUntil: ISODateString;
 }
@@ -227,13 +268,156 @@ export interface RevealLocationsPayload {
 
 export interface FreezePlayerPayload {
   roomCode: RoomCode;
-  targetPlayerId: PlayerId;
+  sessionId: GameSessionId;
+  requestId: string;
+}
+
+export interface ManhuntFreezeWarningPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  requestId: string;
+  warningStartedAt: ISODateString;
+  warningEndsAt: ISODateString;
 }
 
 export interface PlayerFrozenPayload {
   roomCode: RoomCode;
+  sessionId: GameSessionId;
   playerId: PlayerId;
+  requestId: string;
+  frozenAt: ISODateString;
   frozenUntil: ISODateString;
+}
+
+export interface PlayerFreezeEndedPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  requestId: string;
+  endedAt: ISODateString;
+}
+
+export interface FootstepsRequestPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  requestId: string;
+}
+
+export interface ManhuntFootstepsGuidancePayload {
+  requestId: string;
+  bearingDegrees: number;
+  startedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntFootstepsStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  remainingUses: number;
+  serverNow: ISODateString;
+  guidances: ManhuntFootstepsGuidancePayload[];
+}
+
+export interface SmokeBombRequestPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  requestId: string;
+}
+
+export interface ManhuntSmokeBombEffectPayload {
+  requestId: string;
+  startedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntSmokeBombStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  remainingUses: number;
+  serverNow: ISODateString;
+  activeEffects: ManhuntSmokeBombEffectPayload[];
+}
+
+export interface GhostRequestPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  requestId: string;
+}
+
+export interface ManhuntGhostEffectPayload {
+  requestId: string;
+  startedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntGhostStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  usageLimit: number | null;
+  remainingUses: number | null;
+  serverNow: ISODateString;
+  activeEffects: ManhuntGhostEffectPayload[];
+}
+
+export interface FreezeDecoyRequestPayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  requestId: string;
+}
+
+export interface ManhuntFreezeDecoyPayload {
+  decoyId: string;
+  coordinates: Coordinates;
+  startedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntFreezeDecoyStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  serverNow: ISODateString;
+  decoys: ManhuntFreezeDecoyPayload[];
+}
+
+export interface ManhuntFreezeDecoyUsageStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  remainingUses: number;
+  serverNow: ISODateString;
+}
+
+export interface ManhuntLateGameCluePayload {
+  clueId: string;
+  coordinates: Coordinates;
+  recordedAt: ISODateString;
+  exposedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntLateGameClueStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  serverNow: ISODateString;
+  clue: ManhuntLateGameCluePayload | null;
+}
+
+export interface ManhuntLateGameWarningPayload {
+  exposureId: string;
+  startedAt: ISODateString;
+  expiresAt: ISODateString;
+}
+
+export interface ManhuntLateGameWarningStatePayload {
+  roomCode: RoomCode;
+  sessionId: GameSessionId;
+  playerId: PlayerId;
+  serverNow: ISODateString;
+  warning: ManhuntLateGameWarningPayload | null;
 }
 
 export interface CatchAttemptPayload {
@@ -297,6 +481,7 @@ export interface CountdownPayload {
   sessionId: GameSessionId;
   remainingSeconds: number;
   endsAt: ISODateString;
+  runnerHeadStartEndsAt: ISODateString;
   serverNow: ISODateString;
 }
 
@@ -309,6 +494,7 @@ export interface CountdownSyncResponsePayload {
   roomCode: RoomCode;
   sessionId: GameSessionId;
   endsAt: ISODateString;
+  runnerHeadStartEndsAt: ISODateString;
   serverNow: ISODateString;
 }
 
@@ -353,7 +539,9 @@ export interface ClientToServerPayloads {
   [ROOM_EVENTS.JOIN]: JoinRoomPayload;
   [ROOM_EVENTS.LEAVE]: LeaveRoomPayload;
   [ROOM_EVENTS.UPDATE_SETTINGS]: UpdateRoomSettingsPayload;
+  [ROOM_EVENTS.RETURN_TO_LOBBY]: ReturnToLobbyPayload;
   [CONNECTION_EVENTS.RECONNECT]: ReconnectPayload;
+  [CLOCK_EVENTS.SYNC]: ClockSyncPayload;
   [GAME_EVENTS.START_GAME]: StartGamePayload;
   [IMPOSTOR_EVENTS.VOTE_SUBMISSION]: VoteSubmissionPayload;
   [IMPOSTOR_EVENTS.ROLE_REQUEST]: RoleRequestPayload;
@@ -364,6 +552,10 @@ export interface ClientToServerPayloads {
   [MANHUNT_EVENTS.READY_UPDATE]: ManhuntReadyUpdatePayload;
   [MANHUNT_EVENTS.REVEAL]: RevealLocationsPayload;
   [MANHUNT_EVENTS.FREEZE]: FreezePlayerPayload;
+  [MANHUNT_EVENTS.FOOTSTEPS]: FootstepsRequestPayload;
+  [MANHUNT_EVENTS.SMOKE_BOMB]: SmokeBombRequestPayload;
+  [MANHUNT_EVENTS.GHOST]: GhostRequestPayload;
+  [MANHUNT_EVENTS.FREEZE_DECOY]: FreezeDecoyRequestPayload;
   [MANHUNT_EVENTS.CATCH]: CatchAttemptPayload;
   [MANHUNT_EVENTS.CATCH_CONFIRMATION_RESPONSE]: CatchConfirmationResponsePayload;
   [MANHUNT_EVENTS.COUNTDOWN_SYNC]: CountdownSyncPayload;
@@ -386,7 +578,16 @@ export interface ServerToClientPayloads {
   [WORD_IMPOSTOR_EVENTS.VOTE_RESULTS]: WordImpostorVoteResultsPayload;
   [WORD_IMPOSTOR_EVENTS.REVEAL]: WordImpostorRevealPayload;
   [MANHUNT_EVENTS.LOCATION_FLASH]: LocationFlashPayload;
+  [MANHUNT_EVENTS.LATE_GAME_CLUE_STATE]: ManhuntLateGameClueStatePayload;
+  [MANHUNT_EVENTS.LATE_GAME_WARNING_STATE]: ManhuntLateGameWarningStatePayload;
+  [MANHUNT_EVENTS.FREEZE_WARNING]: ManhuntFreezeWarningPayload;
   [MANHUNT_EVENTS.PLAYER_FROZEN]: PlayerFrozenPayload;
+  [MANHUNT_EVENTS.PLAYER_FREEZE_ENDED]: PlayerFreezeEndedPayload;
+  [MANHUNT_EVENTS.FOOTSTEPS_STATE]: ManhuntFootstepsStatePayload;
+  [MANHUNT_EVENTS.SMOKE_BOMB_STATE]: ManhuntSmokeBombStatePayload;
+  [MANHUNT_EVENTS.GHOST_STATE]: ManhuntGhostStatePayload;
+  [MANHUNT_EVENTS.FREEZE_DECOY_STATE]: ManhuntFreezeDecoyStatePayload;
+  [MANHUNT_EVENTS.FREEZE_DECOY_USAGE_STATE]: ManhuntFreezeDecoyUsageStatePayload;
   [MANHUNT_EVENTS.CATCH_CONFIRMATION_REQUEST]: CatchConfirmationRequestPayload;
   [MANHUNT_EVENTS.CATCH_REQUEST_STATUS]: CatchRequestStatusPayload;
   [MANHUNT_EVENTS.CATCH_CONFIRMED]: CatchConfirmedPayload;
@@ -395,8 +596,11 @@ export interface ServerToClientPayloads {
   [MANHUNT_EVENTS.COUNTDOWN]: CountdownPayload;
   [MANHUNT_EVENTS.COUNTDOWN_CANCELLED]: ManhuntCountdownCancelledPayload;
   [MANHUNT_EVENTS.SETTINGS_UPDATE]: ManhuntSettingsUpdatePayload;
+  [MANHUNT_EVENTS.BOUNDARY_UPDATE]: ManhuntBoundaryUpdatePayload;
   [MANHUNT_EVENTS.TEAM_ASSIGNMENT]: ManhuntTeamAssignmentPayload;
   [MANHUNT_EVENTS.READY_UPDATE]: ManhuntReadyUpdatePayload;
+  [MANHUNT_EVENTS.MISSION_ASSIGNMENT]: ManhuntMissionAssignmentPayload;
+  [MANHUNT_EVENTS.MISSION_REVEAL]: ManhuntMissionRevealPayload;
   [CONNECTION_EVENTS.DISCONNECT]: DisconnectPayload;
   [ERROR_EVENTS.SERVER_ERROR]: ServerErrorPayload;
   [ERROR_EVENTS.VALIDATION_ERROR]: ValidationErrorPayload;

@@ -14,7 +14,10 @@ import {
   TopHudBar,
   VoteOption,
 } from "../../src/components";
-import { useServerCountdown } from "../../src/hooks/use-server-countdown";
+import {
+  isCountdownOpen,
+  useServerCountdown,
+} from "../../src/hooks/use-server-countdown";
 import { getSocketClient } from "../../src/services/socket-client";
 import {
   getCurrentVoteKey,
@@ -26,6 +29,8 @@ import {
 } from "../../src/store/word-game-store";
 import { useConnectionStore } from "../../src/store/connection-store";
 import { useRoomStore } from "../../src/store/room-store";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { localizeImpostorError } from "../../src/i18n/impostor-errors";
 import { colors, spacing, typography } from "../../src/theme";
 
 const PLAYER_COLORS = [
@@ -39,6 +44,7 @@ const PLAYER_COLORS = [
 
 export default function ImpostorVoteRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const room = useRoomStore((state) => state.room);
   const playerId = useRoomStore((state) => state.playerId);
   const classicSession = useClassicGameStore((state) => state.session);
@@ -108,6 +114,9 @@ export default function ImpostorVoteRoute() {
     : classicMarkVoteSent;
   const setError = isWordSession ? wordSetError : classicSetError;
   const connectionStatus = useConnectionStore((state) => state.status);
+  const serverClockStatus = useConnectionStore(
+    (state) => state.serverClockStatus,
+  );
   const serverTimeOffsetMs = isWordSession
     ? wordTimeOffset
     : classicTimeOffset;
@@ -139,6 +148,10 @@ export default function ImpostorVoteRoute() {
         ? getCurrentWordVoteKey(session.id, gameState)
         : getCurrentVoteKey(session.id, gameState)
       : null;
+  const votingEndsAt =
+    gameState?.phase === "voting" ? gameState.votingEndsAt : undefined;
+  const votingPhaseId =
+    gameState?.phase === "voting" ? gameState.votingPhaseId : undefined;
   const hasSubmittedCurrentVote =
     currentVoteKey !== null && submittedVoteKey === currentVoteKey;
   const selectedTargetIsEligible = eligiblePlayers.some(
@@ -147,7 +160,7 @@ export default function ImpostorVoteRoute() {
   const canSubmit =
     connectionStatus === "connected" &&
     gameState?.phase === "voting" &&
-    countdown.remainingSeconds !== 0 &&
+    isCountdownOpen(countdown.remainingSeconds) &&
     currentPlayer?.status !== "eliminated" &&
     selectedTargetIsEligible &&
     !hasSubmittedCurrentVote &&
@@ -155,7 +168,7 @@ export default function ImpostorVoteRoute() {
   const canChooseTarget =
     connectionStatus === "connected" &&
     gameState?.phase === "voting" &&
-    countdown.remainingSeconds !== 0 &&
+    isCountdownOpen(countdown.remainingSeconds) &&
     currentPlayer?.status !== "eliminated" &&
     !hasSubmittedCurrentVote &&
     !voteSent;
@@ -166,6 +179,8 @@ export default function ImpostorVoteRoute() {
       !room ||
       !selectedTargetId ||
       !currentVoteKey ||
+      !votingEndsAt ||
+      votingPhaseId === undefined ||
       !canSubmit ||
       !markVoteSent(currentVoteKey, selectedTargetId)
     ) {
@@ -181,11 +196,17 @@ export default function ImpostorVoteRoute() {
       if (session.gameMode === "impostor-word") {
         socket.emit(WORD_IMPOSTOR_EVENTS.VOTE_SUBMISSION, {
           roomCode: session.roomCode,
+          sessionId: session.id,
+          votingEndsAt,
+          votingPhaseId,
           targetPlayerId: selectedTargetId,
         });
       } else {
         socket.emit(IMPOSTOR_EVENTS.VOTE_SUBMISSION, {
           roomCode: session.roomCode,
+          sessionId: session.id,
+          votingEndsAt,
+          votingPhaseId,
           targetPlayerId: selectedTargetId,
         });
       }
@@ -202,17 +223,17 @@ export default function ImpostorVoteRoute() {
     return (
       <Screen>
         <View style={styles.centered}>
-          <Text style={styles.title}>Restoring voting</Text>
+          <Text style={styles.title}>{t("impostor.vote.restoringTitle")}</Text>
           <Text style={styles.mutedText}>
-            Waiting for the current room and game state from the server.
+            {t("impostor.vote.restoringDescription")}
           </Text>
           {error ? (
             <Text accessibilityRole="alert" style={styles.error}>
-              {error}
+              {localizeImpostorError(error, t)}
             </Text>
           ) : null}
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -235,9 +256,9 @@ export default function ImpostorVoteRoute() {
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Round"
+        rightLabel={t("common.round")}
         rightValue={`${gameState.roundNumber}`}
       />
 
@@ -245,36 +266,38 @@ export default function ImpostorVoteRoute() {
         <Chip
           label={
             hasRevote
-              ? "Revote"
+              ? t("impostor.vote.revote")
               : isWordSession
-                ? "Word Impostor"
-                : "Voting"
+                ? t("impostor.mode.word")
+                : t("impostor.vote.label")
           }
           variant={hasRevote ? "pink" : "teal"}
         />
         <Text style={styles.title}>
           {hasRevote
-            ? "Vote again"
+            ? t("impostor.vote.againTitle")
             : isWordSession
-              ? "Who does not know the word?"
-              : "Who seems suspicious?"}
+              ? t("impostor.vote.wordTitle")
+              : t("impostor.vote.classicTitle")}
         </Text>
         <Text style={styles.mutedText}>
-          Your vote is private. You cannot vote for yourself, and the server
-          confirms the result.
+          {t("impostor.vote.privateInstructions")}
         </Text>
       </View>
 
       <HudPanel style={styles.timerPanel}>
-        <Text style={styles.timerLabel}>Voting ends in</Text>
+        <Text style={styles.timerLabel}>{t("impostor.vote.endsIn")}</Text>
         <Text style={styles.timer}>{countdown.label}</Text>
         {gameState.phase === "voting" ? (
           <Text style={styles.mutedText}>
-            {gameState.votesSubmitted} / {gameState.eligibleVoters} votes received
+            {t("impostor.vote.countSummary", {
+              submitted: gameState.votesSubmitted,
+              eligible: gameState.eligibleVoters,
+            })}
           </Text>
         ) : (
           <Text style={styles.mutedText}>
-            Waiting for the server to open voting...
+            {t("impostor.vote.waiting")}
           </Text>
         )}
       </HudPanel>
@@ -282,8 +305,17 @@ export default function ImpostorVoteRoute() {
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting. Your vote is not sent until you submit it."
-            : "Connection lost. Waiting to reconnect..."}
+            ? t("impostor.vote.reconnecting")
+            : t("impostor.vote.connectionLost")}
+        </Text>
+      ) : null}
+      {gameState.phase === "voting" &&
+      serverTimeOffsetMs === null &&
+      connectionStatus === "connected" ? (
+        <Text style={styles.warning}>
+          {serverClockStatus === "failed"
+            ? t("impostor.vote.clockFailed")
+            : t("impostor.vote.clockSyncing")}
         </Text>
       ) : null}
 
@@ -291,10 +323,12 @@ export default function ImpostorVoteRoute() {
         <HudPanel style={styles.noticePanel}>
           <View style={styles.noticeHeading}>
             <AlertCircle color={colors.pink} size={20} />
-            <Text style={styles.sectionTitle}>The server requested a revote</Text>
+            <Text style={styles.sectionTitle}>
+              {t("impostor.vote.revoteRequested")}
+            </Text>
           </View>
           <Text style={styles.mutedText}>
-            The tied players are the only eligible targets for this round.
+            {t("impostor.vote.tiedTargets")}
           </Text>
         </HudPanel>
       ) : null}
@@ -302,16 +336,22 @@ export default function ImpostorVoteRoute() {
       {resultPlayer ? (
         <HudPanel style={styles.resultPanel}>
           <Text style={styles.sectionTitle}>
-            {resultPlayer.nickname} was eliminated
+            {t("impostor.vote.eliminatedTitle", {
+              player: resultPlayer.nickname,
+            })}
           </Text>
           <Text style={styles.mutedText}>
-            The server confirmed the result of round {voteResults?.roundNumber}.
+            {t("impostor.vote.resultConfirmed", {
+              round: voteResults?.roundNumber ?? "",
+            })}
           </Text>
         </HudPanel>
       ) : null}
       {isWordSession && voteResults ? (
         <HudPanel style={styles.resultPanel}>
-          <Text style={styles.sectionTitle}>Server vote totals</Text>
+          <Text style={styles.sectionTitle}>
+            {t("impostor.vote.serverTotals")}
+          </Text>
           {voteResults.tallies.map((tally) => {
             const player =
               room.players.find(
@@ -324,7 +364,12 @@ export default function ImpostorVoteRoute() {
               <View key={tally.targetPlayerId} style={styles.tallyRow}>
                 <Text style={styles.mutedText}>{player.nickname}</Text>
                 <Text style={styles.tallyCount}>
-                  {tally.count} {tally.count === 1 ? "vote" : "votes"}
+                  {t(
+                    tally.count === 1
+                      ? "impostor.vote.voteCountOne"
+                      : "impostor.vote.voteCountMany",
+                    { count: tally.count },
+                  )}
                 </Text>
               </View>
             ) : null;
@@ -335,9 +380,13 @@ export default function ImpostorVoteRoute() {
       {gameState.phase === "voting" && currentPlayer?.status !== "eliminated" ? (
         <HudPanel style={styles.optionsPanel}>
           <View style={styles.panelHeading}>
-            <Text style={styles.sectionTitle}>Choose a player</Text>
+            <Text style={styles.sectionTitle}>
+              {t("impostor.vote.choosePlayer")}
+            </Text>
             <Chip
-              label={`${eligiblePlayers.length} eligible`}
+              label={t("impostor.vote.eligibleCount", {
+                count: eligiblePlayers.length,
+              })}
               variant="muted"
             />
           </View>
@@ -356,20 +405,24 @@ export default function ImpostorVoteRoute() {
                   selected={selectedTargetId === player.id}
                   disabled={!canChooseTarget}
                   onPress={() => selectTarget(player.id)}
+                  outLabel={t("impostor.vote.out")}
+                  selectedLabel={t("impostor.vote.yourVote")}
                 />
               ))}
             </View>
           ) : (
             <Text style={styles.mutedText}>
-              No eligible vote targets are available.
+              {t("impostor.vote.noTargets")}
             </Text>
           )}
         </HudPanel>
       ) : gameState.phase === "voting" ? (
         <HudPanel style={styles.noticePanel}>
-          <Text style={styles.sectionTitle}>You have been eliminated</Text>
+          <Text style={styles.sectionTitle}>
+            {t("impostor.vote.eliminated")}
+          </Text>
           <Text style={styles.mutedText}>
-            You cannot submit votes in later rounds.
+            {t("impostor.vote.noLaterVotes")}
           </Text>
         </HudPanel>
       ) : null}
@@ -378,23 +431,27 @@ export default function ImpostorVoteRoute() {
         <View style={styles.sentNotice}>
           <Check color={colors.green} size={18} />
           <Text style={styles.sentText}>
-            Vote sent. Waiting for the server to resolve the round.
+            {t("impostor.vote.sentWaiting")}
           </Text>
         </View>
       ) : null}
       {countdown.remainingSeconds === 0 && gameState.phase === "voting" ? (
         <Text style={styles.mutedText}>
-          Voting time has ended. Waiting for the server result...
+          {t("impostor.vote.timeEnded")}
         </Text>
       ) : null}
       {error ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(error, t)}
         </Text>
       ) : null}
 
       <PrimaryButton
-        title={voteSent ? "Vote sent" : "Submit vote"}
+        title={
+          voteSent
+            ? t("impostor.vote.sent")
+            : t("impostor.vote.submit")
+        }
         leftIcon={Vote}
         disabled={!canSubmit}
         onPress={submitVote}

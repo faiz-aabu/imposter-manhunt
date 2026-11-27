@@ -3,6 +3,7 @@ import { Check, Target, X } from "lucide-react-native";
 import type { CatchConfirmationRequestPayload } from "@impostor/api";
 import { colors, radii, spacing, typography } from "../theme";
 import { PrimaryButton } from "./PrimaryButton";
+import { useTranslation } from "../i18n/use-translation";
 
 interface ManhuntCatchConfirmationModalProps {
   request: CatchConfirmationRequestPayload | null;
@@ -19,6 +20,8 @@ export function ManhuntCatchConfirmationModal({
   onAccept,
   onReject,
 }: ManhuntCatchConfirmationModalProps) {
+  const t = useTranslation();
+
   return (
     <Modal
       visible={request !== null}
@@ -29,27 +32,31 @@ export function ManhuntCatchConfirmationModal({
       <View style={styles.backdrop}>
         <View accessibilityViewIsModal style={styles.card}>
           <Target color={colors.pinkMap} size={28} strokeWidth={2} />
-          <Text style={styles.title}>Catch confirmation</Text>
+          <Text style={styles.title}>{t("manhunt.catch.title")}</Text>
           <Text style={styles.message}>
-            {request?.hunterNickname ?? "A hunter"} says they caught you.
-            {"\n"}Accept only if you agree this is accurate.
+            {t("manhunt.catch.message", {
+              hunter:
+                request?.hunterNickname ?? t("manhunt.team.hunter"),
+            })}
           </Text>
           {error ? <Text style={styles.error}>{error}</Text> : null}
           {busy ? (
             <View style={styles.progress}>
               <ActivityIndicator color={colors.teal} />
-              <Text style={styles.progressText}>Sending your response...</Text>
+              <Text style={styles.progressText}>
+                {t("manhunt.catch.sending")}
+              </Text>
             </View>
           ) : null}
           <PrimaryButton
-            title="Accept catch"
+            title={t("manhunt.catch.accept")}
             leftIcon={Check}
             variant="pink"
             disabled={busy}
             onPress={onAccept}
           />
           <PrimaryButton
-            title="Reject catch"
+            title={t("manhunt.catch.reject")}
             leftIcon={X}
             variant="secondary"
             disabled={busy}

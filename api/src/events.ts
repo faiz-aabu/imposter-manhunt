@@ -3,6 +3,7 @@ export const ROOM_EVENTS = {
   JOIN: "room:join",
   LEAVE: "room:leave",
   UPDATE_SETTINGS: "room:update_settings",
+  RETURN_TO_LOBBY: "room:return_to_lobby",
   UPDATE: "room:update",
   PLAYER_JOINED: "room:player_joined",
   PLAYER_LEFT: "room:player_left",
@@ -12,6 +13,10 @@ export const CONNECTION_EVENTS = {
   RECONNECT: "connection:reconnect",
   DISCONNECT: "disconnect",
   PLAYER_RECONNECTED: "connection:player_reconnected",
+} as const;
+
+export const CLOCK_EVENTS = {
+  SYNC: "clock:sync",
 } as const;
 
 export const GAME_EVENTS = {
@@ -42,6 +47,7 @@ export const WORD_IMPOSTOR_EVENTS = {
 export const MANHUNT_EVENTS = {
   UPDATE_SETTINGS: "manhunt:update_settings",
   SETTINGS_UPDATE: "manhunt:settings_update",
+  BOUNDARY_UPDATE: "manhunt:boundary_update",
   TEAM_ASSIGNMENT: "manhunt:team_assignment",
   READY_UPDATE: "manhunt:ready_update",
   COUNTDOWN: "manhunt:countdown",
@@ -49,9 +55,24 @@ export const MANHUNT_EVENTS = {
   COUNTDOWN_CANCELLED: "manhunt:countdown_cancelled",
   LOCATION_UPDATE: "manhunt:location_update",
   LOCATION_FLASH: "manhunt:location_flash",
+  LATE_GAME_CLUE_STATE: "manhunt:late_game_clue_state",
+  LATE_GAME_WARNING_STATE: "manhunt:late_game_warning_state",
   REVEAL: "manhunt:reveal",
+  MISSION_ASSIGNMENT: "manhunt:mission_assignment",
+  MISSION_REVEAL: "manhunt:mission_reveal",
+  FREEZE_WARNING: "manhunt:freeze_warning",
   FREEZE: "manhunt:freeze",
   PLAYER_FROZEN: "manhunt:player_frozen",
+  PLAYER_FREEZE_ENDED: "manhunt:player_freeze_ended",
+  FOOTSTEPS: "manhunt:footsteps",
+  FOOTSTEPS_STATE: "manhunt:footsteps_state",
+  SMOKE_BOMB: "manhunt:smoke_bomb",
+  SMOKE_BOMB_STATE: "manhunt:smoke_bomb_state",
+  GHOST: "manhunt:ghost",
+  GHOST_STATE: "manhunt:ghost_state",
+  FREEZE_DECOY: "manhunt:freeze_decoy",
+  FREEZE_DECOY_STATE: "manhunt:freeze_decoy_state",
+  FREEZE_DECOY_USAGE_STATE: "manhunt:freeze_decoy_usage_state",
   CATCH: "manhunt:catch",
   CATCH_CONFIRMATION_REQUEST: "manhunt:catch_confirmation_request",
   CATCH_CONFIRMATION_RESPONSE: "manhunt:catch_confirmation_response",
@@ -69,6 +90,7 @@ export const ERROR_EVENTS = {
 export const SOCKET_EVENTS = {
   ROOM: ROOM_EVENTS,
   CONNECTION: CONNECTION_EVENTS,
+  CLOCK: CLOCK_EVENTS,
   GAME: GAME_EVENTS,
   IMPOSTOR: IMPOSTOR_EVENTS,
   WORD_IMPOSTOR: WORD_IMPOSTOR_EVENTS,
@@ -81,6 +103,7 @@ type EventValues<T> = T[keyof T];
 export type SocketEventName =
   | EventValues<typeof ROOM_EVENTS>
   | EventValues<typeof CONNECTION_EVENTS>
+  | EventValues<typeof CLOCK_EVENTS>
   | EventValues<typeof GAME_EVENTS>
   | EventValues<typeof IMPOSTOR_EVENTS>
   | EventValues<typeof WORD_IMPOSTOR_EVENTS>

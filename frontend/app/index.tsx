@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   StyleSheet,
   Text,
@@ -9,6 +9,7 @@ import { Diamond } from "lucide-react-native";
 import {
   Chip,
   HudPanel,
+  LanguageSelector,
   PrimaryButton,
   Screen,
   TextField,
@@ -22,10 +23,15 @@ import {
 import { persistRoomEntry } from "../src/services/room-entry";
 import { emitWithAcknowledgement } from "../src/services/socket-requests";
 import { colors, radii, spacing, typography } from "../src/theme";
+import { useTranslation } from "../src/i18n/use-translation";
+import { localizeSharedError } from "../src/i18n/shared-errors";
 import { nicknameSchema, ROOM_EVENTS } from "@impostor/api";
 
 export default function HomeRoute() {
   const router = useRouter();
+  const t = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const [nickname, setNickname] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -34,6 +40,8 @@ export default function HomeRoute() {
   const connectionError = useConnectionStore(
     (state) => state.latestConnectionError,
   );
+  const localizedConnectionError = localizeSharedError(connectionError, t);
+  const localizedErrorMessage = localizeSharedError(errorMessage, t);
   const setRoomSession = useRoomStore((state) => state.setSession);
 
   useEffect(() => {
@@ -48,8 +56,10 @@ export default function HomeRoute() {
         if (active) {
           setErrorMessage(
             error instanceof Error
-              ? `Could not load the saved nickname: ${error.message}`
-              : "Could not load the saved nickname.",
+              ? translationRef.current("home.nicknameLoadError", {
+                  message: error.message,
+                })
+              : translationRef.current("home.nicknameLoadFallback"),
           );
         }
       });
@@ -71,8 +81,10 @@ export default function HomeRoute() {
         if (active) {
           setErrorMessage(
             error instanceof Error
-              ? `Could not save the nickname: ${error.message}`
-              : "Could not save the nickname.",
+              ? translationRef.current("home.nicknameSaveError", {
+                  message: error.message,
+                })
+              : translationRef.current("home.nicknameSaveFallback"),
           );
         }
       });
@@ -88,7 +100,7 @@ export default function HomeRoute() {
     const parsedNickname = nicknameSchema.safeParse(nickname);
     if (!parsedNickname.success) {
       setErrorMessage(
-        parsedNickname.error.issues[0]?.message ?? "Enter a valid nickname.",
+        t("home.nicknameInvalid"),
       );
       return;
     }
@@ -115,7 +127,7 @@ export default function HomeRoute() {
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : "Could not create a room. Please try again.",
+          : t("home.createRoomError"),
       );
     } finally {
       setIsLoading(false);
@@ -136,10 +148,10 @@ export default function HomeRoute() {
         <View style={styles.brandIcon}>
           <Diamond color={colors.violet} size={24} strokeWidth={2.2} />
         </View>
-        <Text style={styles.eyebrow}>Party games</Text>
+        <Text style={styles.eyebrow}>{t("home.brand")}</Text>
       </View>
 
-      <Text style={styles.headline}>Impostor &amp; Manhunt</Text>
+      <Text style={styles.headline}>{t("home.title")}</Text>
 
       <HudPanel style={styles.mapPanel}>
         <View style={styles.mapPreview}>
@@ -152,46 +164,52 @@ export default function HomeRoute() {
           </View>
           <View style={styles.pinkDot} />
           <View style={styles.greenDot} />
-          <Chip label="Manhunt" variant="gold" style={styles.mapChip} />
+          <Chip
+            label={t("home.previewManhunt")}
+            variant="gold"
+            style={styles.mapChip}
+          />
         </View>
       </HudPanel>
 
       <Text style={styles.tagline}>
-        One room. Two ways to outsmart your friends.
+        {t("home.tagline")}
       </Text>
+
+      <LanguageSelector />
 
       <TextField
         autoCapitalize="words"
-        label="Your nickname"
+        label={t("home.nicknameLabel")}
         onChangeText={handleNicknameChange}
-        placeholder="Enter your name"
+        placeholder={t("home.nicknamePlaceholder")}
         value={nickname}
         style={styles.nicknameField}
       />
 
       {!isConnected ? (
         <Text style={styles.connectionHint}>
-          {connectionError ??
+          {localizedConnectionError ??
             (connectionStatus === "error"
-              ? "Could not connect to the game server."
-              : "Connecting to the game server...")}
+              ? t("home.connectionError")
+              : t("home.connecting"))}
         </Text>
       ) : null}
-      {errorMessage ? (
+      {localizedErrorMessage ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {errorMessage}
+          {localizedErrorMessage}
         </Text>
       ) : null}
 
       <PrimaryButton
-        title="Create a room"
+        title={t("home.createRoom")}
         onPress={handleCreateRoom}
         loading={isLoading}
         style={styles.createButton}
       />
 
       <PrimaryButton
-        title="Join with a code"
+        title={t("home.joinWithCode")}
         variant="secondary"
         onPress={() => router.push("/join")}
       />

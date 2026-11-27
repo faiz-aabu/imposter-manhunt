@@ -3,8 +3,11 @@ import { Text, StyleSheet, View } from "react-native";
 import { Chip, Screen } from "../../src/components";
 import { useManhuntGameStore } from "../../src/store/manhunt-game-store";
 import { colors, spacing, typography } from "../../src/theme";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { MANHUNT_RUNNER_HEAD_START_SECONDS } from "@impostor/api";
 
 export default function CountdownRoute() {
+  const t = useTranslation();
   const gameState = useManhuntGameStore((state) => state.gameState);
   const ownTeam = useManhuntGameStore((state) => state.ownTeam);
   const countdown = useManhuntGameStore((state) => state.countdown);
@@ -37,28 +40,51 @@ export default function CountdownRoute() {
   return (
     <Screen contentContainerStyle={styles.content}>
       <Chip label="MANHUNT" variant="pink" />
-      <Text style={styles.title}>Starting Manhunt</Text>
+      <Text style={styles.title}>
+        {ownTeam === "hunter"
+          ? t("manhunt.countdown.titleHunter")
+          : t("manhunt.countdown.titleStarting")}
+      </Text>
       {ownTeam ? (
         <Text style={styles.teamText}>
-          Your team: {ownTeam === "hunter" ? "Hunter" : "Runner"}
+          {t("manhunt.countdown.yourTeam", {
+            team: t(
+              ownTeam === "hunter"
+                ? "manhunt.team.hunter"
+                : "manhunt.team.runner",
+            ),
+          })}
+        </Text>
+      ) : null}
+      {ownTeam === "hunter" ? (
+        <Text style={styles.subtitle}>
+          {t("manhunt.countdown.headStart", {
+            seconds: MANHUNT_RUNNER_HEAD_START_SECONDS,
+          })}
         </Text>
       ) : null}
       {remainingSeconds !== null ? (
         <View accessibilityLiveRegion="polite" style={styles.countdown}>
           <Text style={styles.countdownValue}>{remainingSeconds}</Text>
           <Text style={styles.countdownLabel}>
-            {remainingSeconds === 1 ? "second" : "seconds"}
+            {t(
+              remainingSeconds === 1
+                ? "manhunt.countdown.second"
+                : "manhunt.countdown.seconds",
+            )}
           </Text>
         </View>
       ) : (
         <Text style={styles.subtitle}>
           {isCountdown
-            ? "Synchronizing with the server countdown..."
-            : "Waiting for the authoritative server start."}
+            ? t("manhunt.countdown.syncing")
+            : t("manhunt.countdown.waiting")}
         </Text>
       )}
       <Text style={styles.subtitle}>
-        The map opens when the server confirms the start.
+        {ownTeam === "hunter"
+          ? t("manhunt.countdown.stay")
+          : t("manhunt.countdown.mapOpens")}
       </Text>
     </Screen>
   );
@@ -74,6 +100,7 @@ const styles = StyleSheet.create({
   title: {
     ...typography.title,
     color: colors.text,
+    textAlign: "center",
   },
   teamText: {
     ...typography.body,

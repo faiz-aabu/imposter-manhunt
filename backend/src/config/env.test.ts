@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadConfig } from "./env.js";
 
-test("development config defaults to permissive origins and no trusted proxies", () => {
+test("development config defaults to permissive origins and approved exposure durations", () => {
   const config = loadConfig({});
 
   assert.equal(config.nodeEnv, "development");
@@ -11,6 +11,44 @@ test("development config defaults to permissive origins and no trusted proxies",
   assert.equal(config.trustProxyHops, 0);
   assert.equal(config.requireHttps, false);
   assert.equal(config.guestProfiles, null);
+  assert.deepEqual(config.lateGameExposureDurations, {
+    clueDurationSeconds: 15,
+    warningDurationSeconds: 5,
+  });
+});
+
+test("late-game exposure configuration accepts only approved durations", () => {
+  const configured = loadConfig({
+    MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS: "15",
+    MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS: "5",
+  });
+  assert.deepEqual(configured.lateGameExposureDurations, {
+    clueDurationSeconds: 15,
+    warningDurationSeconds: 5,
+  });
+
+  assert.throws(
+    () =>
+      loadConfig({
+        MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS: "23",
+        MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS: "7",
+      }),
+    /must match the approved configuration/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        MANHUNT_LATE_GAME_CLUE_DURATION_SECONDS: "23",
+      }),
+    /must be configured together/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        MANHUNT_LATE_GAME_WARNING_DURATION_SECONDS: "0",
+      }),
+    /must be a positive safe integer/,
+  );
 });
 
 test("guest profile Supabase configuration is optional but validated when supplied", () => {

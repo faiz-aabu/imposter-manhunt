@@ -11,6 +11,8 @@ interface VoteOptionProps {
   out?: boolean;
   disabled?: boolean;
   avatarColor?: string;
+  outLabel?: string;
+  selectedLabel?: string;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -21,6 +23,8 @@ export function VoteOption({
   out = false,
   disabled = false,
   avatarColor,
+  outLabel = "Out",
+  selectedLabel = "Your vote",
   style,
 }: VoteOptionProps) {
   const isDisabled = disabled || out;
@@ -44,9 +48,9 @@ export function VoteOption({
         {name}
       </Text>
       {out ? (
-        <Chip label="Out" variant="muted" />
+        <Chip label={outLabel} variant="muted" />
       ) : selected ? (
-        <Chip label="Your vote" variant="pink" />
+        <Chip label={selectedLabel} variant="pink" />
       ) : null}
     </Pressable>
   );

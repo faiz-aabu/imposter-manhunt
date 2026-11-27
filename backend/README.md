@@ -148,8 +148,9 @@ Keep the warning visible and revisit it when Expo ships an SDK 58-compatible
 
 ## Persistence and restart behavior
 
-The room service and all game services currently keep state in memory. A
-process restart loses:
+The normal backend entry point keeps the room service and all game services in
+memory. It is not wired to the durable-room runtime, so a normal process
+restart loses:
 
 - Rooms, room membership, player connection state, and host assignments.
 - Hashed reconnect tokens and the active reconnect window.
@@ -164,6 +165,118 @@ users must create or join a new room. Do not persist precise Manhunt GPS
 locations. A first release should either clearly treat restarts as ending all
 active games or defer public launch until the product's restart expectations
 are settled.
+
+The separately constructed `DurableRoomRuntime` has an explicit, isolated
+recovery path for waiting-room metadata and reconnect credentials. It runs only
+after acquiring the fenced runtime lease, restores members as disconnected,
+and does not resume active games or broadcast recovered state. This recovery
+path is not connected to normal backend startup or live socket handlers; it
+does not change the in-memory behavior above.
+
+If a durable disconnected-player removal commits but its gameplay or socket
+side effects fail, that room's gameplay is suspended for the remainder of the
+running process. Reconnect and read-only room state may remain available, but
+game actions and game-state resume snapshots are blocked. The suspension is
+process-local and is not an active-game recovery mechanism: controlled runtime
+recovery must close any interrupted active game rather than restore its
+in-memory state or reuse its game ID. There is no public operator endpoint or
+automatic replay of the committed removal or its public events.
+
+## Durable-runtime reconciliation exhaustion recovery
+
+This procedure applies only to a deployment that explicitly constructs and
+injects `DurableRoomRuntime`. The normal backend entry point and the documented
+Railway start command do not enable that runtime. Confirm that the actual
+deployment is intentionally running the durable runtime before using these
+steps; the repository does not define a durable-runtime-specific deployment
+command or process configuration.
+
+### Identify an exhausted room
+
+Inspect `GET /ready` and the structured backend logs together. The readiness
+response's `unresolved.exhaustedReconciliations` is an aggregate count, not a
+room list. A room-level exhaustion does not by itself stop the runtime from
+accepting traffic, so `/ready` may still return HTTP 200. The structured log
+event `deferred_room_reconciliation_exhausted` includes the room code and
+attempt count; exhaustion occurs after attempt 5. Related
+`deferred_room_reconciliation_failed` logs include an error class, not the
+pending mutation contents.
+
+The worker and deferred mutation queue retain the blocked mutation in process
+memory. For the post-commit timeout-side-effect failure described above, the
+room also remains persistence-fenced and gameplay-suspended. There is no
+public endpoint to inspect or clear that state. Do not clear the fence, remove
+lease records, or attempt to replay the mutation or its public events.
+
+### Normal recovery
+
+1. Use the deployment platform's supported process-management controls to
+   gracefully stop the affected durable-runtime process. Do not invent or
+   reuse a command from a deployment configuration that starts only the normal
+   in-memory backend. The current Railway guide documents a dashboard
+   redeployment action for that normal backend, but does not configure or
+   operate `DurableRoomRuntime`; the exact action for a durable deployment is
+   an operational prerequisite.
+2. Wait for the platform to confirm that the old process has exited before
+   starting or routing traffic to a replacement. Graceful shutdown stops
+   admission and drains admitted operations and workers before releasing the
+   database lease. The lease is a connection-scoped PostgreSQL advisory lock;
+   the runtime will not become serving-ready unless it acquires that lock and
+   verifies ownership. A replacement that cannot acquire the lease must not
+   serve traffic.
+3. If shutdown exceeds its 30-second drain deadline, treat the lease as still
+   held: the close operation reports a timeout while draining continues, and
+   the runtime retains ownership until the admitted work settles. Do not infer
+   release from the timeout. If the process does not finish graceful shutdown,
+   use only the platform's approved termination control after confirming the
+   old process is the one being stopped. If process exit or lease release
+   cannot be established, stop and escalate to the platform/database
+   operator; do not launch a concurrent runtime or manually change fencing or
+   lease records.
+4. Start the replacement only after the previous process is confirmed stopped.
+   The code does not emit a separate durable "lease released" operator event,
+   and the old HTTP server is closed as shutdown proceeds. A successful
+   replacement lease acquisition followed by `/ready` reporting
+   `databaseLeaseOwned: true` and `durableRuntimeReadiness: "serving_ready"`
+   confirms that the database lock is no longer held by the previous runtime.
+   If startup reports that the lease is unavailable, do not route traffic;
+   escalate rather than bypassing the lease.
+5. Wait for startup recovery to finish, then verify `/ready` reports
+   `acceptingTraffic: true`, `databaseLeaseOwned: true`,
+   `waitingRoomRecoveryCompleted: true`, and
+   `durableRuntimeReadiness: "serving_ready"`. A zero
+   `unresolved.exhaustedReconciliations` after restart is not proof that the
+   old mutation was replayed or resolved: reconciliation diagnostics and the
+   in-memory queue are process-local and start fresh.
+
+### What startup recovery does
+
+While holding the lease, startup expires due active waiting rooms before
+loading recoverable rooms. For remaining active waiting rooms, it removes
+already-overdue disconnected members, marks connected members disconnected
+with a new reconnect deadline, and preserves rooms that still have active
+members. Empty waiting rooms are deleted. Only active waiting rooms are loaded
+back into memory; reconnect credentials and persisted waiting-room metadata
+are restored, but no socket events are replayed.
+
+Active rooms whose game status is `starting`, `in_progress`, or `finished` are
+closed rather than resumed. Recovery clears the host, increments the room
+version, removes active memberships and their reconnect credentials, and
+preserves the recorded game status rather than claiming the game completed.
+Their prior in-memory roles, votes, timers, locations, and other game state
+are not reconstructed. Users should expect an interrupted active game to end;
+they must create or join a new room rather than resume that game. Already
+closed or expired rooms are not restored as active rooms.
+
+### Escalation case
+
+Escalate when the old process cannot be confirmed stopped, the lease remains
+unavailable after confirmed process exit, shutdown cleanup reports a lease or
+pool-release error, or startup recovery fails. Keep the replacement out of
+service until the platform/database operator confirms the owner is gone and
+the replacement acquires the lease. Never delete or edit fencing/lease
+records, clear a room suspension manually, or resume a game from incomplete
+in-memory state.
 
 For a low-complexity first deployment, use one Node.js instance and no separate
 database while rooms are intentionally ephemeral. If durable room metadata,

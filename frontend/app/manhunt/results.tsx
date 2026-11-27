@@ -4,9 +4,22 @@ import { Chip, PrimaryButton, Screen } from "../../src/components";
 import { useManhuntGameStore } from "../../src/store/manhunt-game-store";
 import { useRoomStore } from "../../src/store/room-store";
 import { colors, spacing, typography } from "../../src/theme";
+import { useTranslation } from "../../src/i18n/use-translation";
+import type { PlayerStatus } from "@impostor/api";
+import type { TranslationKey } from "../../src/i18n/locales";
+
+const playerStatusKeys: Record<PlayerStatus, TranslationKey> = {
+  waiting: "manhunt.results.waitingStatus",
+  active: "manhunt.results.activeStatus",
+  eliminated: "manhunt.results.eliminatedStatus",
+  frozen: "manhunt.results.frozenStatus",
+  caught: "manhunt.results.caught",
+  escaped: "manhunt.results.escapedStatus",
+} as const;
 
 export default function ResultsRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const result = useManhuntGameStore((state) => state.result);
   const players = useManhuntGameStore((state) => state.playersAtStart);
   const room = useRoomStore((state) => state.room);
@@ -17,17 +30,22 @@ export default function ResultsRoute() {
     ? room?.players
         .filter((player) => result.result.winnerPlayerIds.includes(player.id))
         .length
-      ? "Hunters"
-      : "No winner"
+        ? t("manhunt.results.hunters")
+        : t("manhunt.results.noWinner")
     : null;
 
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
-      <Chip label="MANHUNT RESULTS" variant={result ? "gold" : "white"} />
-      <Text style={styles.title}>{winnerTeam ?? "Waiting for result"}</Text>
+        <Chip
+          label={t("manhunt.results.label")}
+          variant={result ? "gold" : "white"}
+        />
+        <Text style={styles.title}>
+          {winnerTeam ?? t("manhunt.results.waiting")}
+        </Text>
       {!result ? (
         <Text style={styles.subtitle}>
-          Waiting for the authoritative game-end event.
+            {t("manhunt.results.waitingEvent")}
         </Text>
       ) : (
         <View style={styles.panel}>
@@ -37,7 +55,9 @@ export default function ResultsRoute() {
               <View key={player.id} style={styles.playerRow}>
                 <Text style={styles.playerName}>{player.nickname}</Text>
                 <Text style={styles.statusText}>
-                  {caught ? "Caught" : player.status}
+                  {caught
+                    ? t("manhunt.results.caught")
+                    : t(playerStatusKeys[player.status])}
                 </Text>
               </View>
             );
@@ -45,7 +65,7 @@ export default function ResultsRoute() {
         </View>
       )}
       <PrimaryButton
-        title="Back to room"
+        title={t("manhunt.results.backToRoom")}
         variant="secondary"
         onPress={() => router.replace("/lobby")}
       />

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   StyleSheet,
@@ -22,6 +22,8 @@ import { getSavedNickname } from "../src/services/player-session";
 import { persistRoomEntry } from "../src/services/room-entry";
 import { useRoomStore } from "../src/store/room-store";
 import { colors, spacing, typography } from "../src/theme";
+import { useTranslation } from "../src/i18n/use-translation";
+import { localizeSharedError } from "../src/i18n/shared-errors";
 import { nicknameSchema, roomCodeSchema, ROOM_EVENTS } from "@impostor/api";
 import type { Room } from "@impostor/api";
 
@@ -35,6 +37,9 @@ type RoomLookup =
 
 export default function JoinRoute() {
   const router = useRouter();
+  const t = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const [nickname, setNickname] = useState("");
   const [roomCode, setRoomCode] = useState("");
   const [lookup, setLookup] = useState<RoomLookup>({ status: "idle" });
@@ -54,8 +59,10 @@ export default function JoinRoute() {
         if (active) {
           setJoinError(
             error instanceof Error
-              ? `Could not load the saved nickname: ${error.message}`
-              : "Could not load the saved nickname.",
+              ? translationRef.current("join.nicknameLoadError", {
+                  message: error.message,
+                })
+              : translationRef.current("join.nicknameFallback"),
           );
         }
       });
@@ -95,10 +102,10 @@ export default function JoinRoute() {
           status: "error",
           code,
           message: lookupTimedOut
-            ? "Room lookup timed out. Check your connection and try again."
+            ? translationRef.current("join.lookupTimeout")
             : error instanceof Error
               ? error.message
-              : "Could not find that room. Check the code and try again.",
+              : translationRef.current("join.lookupError"),
         });
       })
       .finally(() => clearTimeout(timeout));
@@ -119,6 +126,8 @@ export default function JoinRoute() {
     lookup.status === "error" && lookup.code === roomCode
       ? lookup.message
       : null;
+  const localizedLookupError = localizeSharedError(lookupError, t);
+  const localizedJoinError = localizeSharedError(joinError, t);
   const playerCount = confirmedRoom?.players.length ?? 0;
   const duplicateNickname = useMemo(
     () =>
@@ -135,7 +144,7 @@ export default function JoinRoute() {
   const hostName =
     confirmedRoom?.players.find(
       (player) => player.id === confirmedRoom.hostId,
-    )?.nickname ?? "Host";
+    )?.nickname ?? t("join.hostFallback");
 
   const handleJoinRoom = async () => {
     if (!confirmedRoom) {
@@ -144,16 +153,16 @@ export default function JoinRoute() {
     const parsedNickname = nicknameSchema.safeParse(nickname);
     if (!parsedNickname.success) {
       setJoinError(
-        parsedNickname.error.issues[0]?.message ?? "Enter a valid nickname.",
+        t("join.nicknameInvalid"),
       );
       return;
     }
     if (duplicateNickname) {
-      setJoinError("That nickname is already being used in this room.");
+      setJoinError(t("join.nicknameAlreadyUsed"));
       return;
     }
     if (isRoomFull) {
-      setJoinError("This room is full.");
+      setJoinError(t("join.roomFull"));
       return;
     }
 
@@ -182,7 +191,7 @@ export default function JoinRoute() {
       setJoinError(
         error instanceof Error
           ? error.message
-          : "Could not join the room. Please try again.",
+          : t("join.roomError"),
       );
     } finally {
       setIsJoining(false);
@@ -192,28 +201,31 @@ export default function JoinRoute() {
   return (
     <Screen scrollable contentContainerStyle={styles.content}>
       <IconButton
-        accessibilityLabel="Back to home"
+        accessibilityLabel={t("join.backAccessibility")}
         icon={ArrowLeft}
         onPress={() => router.replace("/")}
         style={styles.backButton}
       />
 
-      <Text style={styles.title}>Join a room</Text>
+      <Text style={styles.title}>{t("join.title")}</Text>
 
       <TextField
         autoCapitalize="words"
-        label="Your nickname"
+        label={t("join.nicknameLabel")}
         onChangeText={(value) => {
           setNickname(value);
           setJoinError(null);
         }}
-        placeholder="Enter your name"
+        placeholder={t("join.nicknamePlaceholder")}
         value={nickname}
       />
 
       <View style={styles.codeSection}>
-        <Text style={styles.sectionLabel}>Room code</Text>
+        <Text style={styles.sectionLabel}>{t("join.roomCode")}</Text>
         <CodeInput
+          accessibilityLabelForIndex={(current, total) =>
+            t("join.codeCharacter", { current, total })
+          }
           value={roomCode}
           onChangeText={(value) => {
             setRoomCode(value);
@@ -225,7 +237,7 @@ export default function JoinRoute() {
       {isLookingUp ? (
         <View style={styles.lookupStatus}>
           <ActivityIndicator color={colors.teal} />
-          <Text style={styles.mutedText}>Looking for that room...</Text>
+          <Text style={styles.mutedText}>{t("join.looking")}</Text>
         </View>
       ) : null}
 
@@ -233,40 +245,45 @@ export default function JoinRoute() {
         <HudPanel highlightColor={colors.green} style={styles.roomPanel}>
           <View style={styles.roomHeader}>
             <View style={styles.statusDot} />
-            <Text style={styles.roomFoundTitle}>Room found</Text>
+            <Text style={styles.roomFoundTitle}>{t("join.roomFound")}</Text>
             <Chip label={confirmedRoom.code} variant="teal" />
           </View>
-          <Text style={styles.hostText}>Hosted by {hostName}</Text>
+          <Text style={styles.hostText}>
+            {t("join.hostedBy", { name: hostName })}
+          </Text>
           <View style={styles.playerCountRow}>
             <Users color={colors.textMuted} size={18} />
             <Text style={styles.playerCountText}>
-              {playerCount} / {confirmedRoom.settings.maxPlayers} players inside
+              {t("join.playersInside", {
+                players: playerCount,
+                maximum: confirmedRoom.settings.maxPlayers,
+              })}
             </Text>
           </View>
           {isRoomFull ? (
-            <Text style={styles.error}>This room is full.</Text>
+            <Text style={styles.error}>{t("join.roomFull")}</Text>
           ) : null}
           {duplicateNickname ? (
             <Text style={styles.error}>
-              That nickname is already being used in this room.
+              {t("join.duplicateNickname")}
             </Text>
           ) : null}
         </HudPanel>
       ) : null}
 
-      {lookupError ? (
+      {localizedLookupError ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {lookupError}
+          {localizedLookupError}
         </Text>
       ) : null}
-      {joinError ? (
+      {localizedJoinError ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {joinError}
+          {localizedJoinError}
         </Text>
       ) : null}
 
       <PrimaryButton
-        title="Join room"
+        title={t("join.joinRoom")}
         onPress={handleJoinRoom}
         disabled={!confirmedRoom || isRoomFull || duplicateNickname}
         loading={isJoining}

@@ -9,7 +9,6 @@ import {
   DEFAULT_VOTING_DURATION_SECONDS,
   GAME_EVENTS,
   MAX_DISCUSSION_DURATION_SECONDS,
-  MAX_PLAYERS_PER_ROOM,
   MAX_VOTING_DURATION_SECONDS,
   MIN_CLASSIC_IMPOSTOR_PLAYERS,
   MIN_DISCUSSION_DURATION_SECONDS,
@@ -19,10 +18,12 @@ import {
   DEFAULT_WORD_IMPOSTOR_COUNT,
   MIN_WORD_IMPOSTOR_PLAYERS,
   WORD_IMPOSTOR_CATEGORIES,
+  classicImpostorSettingsSchema,
   wordImpostorSettingsSchema,
 } from "@impostor/api";
 import type {
   ClassicImpostorSettings,
+  RoomUpdatePayload,
   WordCategory,
   WordImpostorSettings,
 } from "@impostor/api";
@@ -35,11 +36,21 @@ import {
   TopHudBar,
 } from "../../src/components";
 import { emitWithAcknowledgement } from "../../src/services/socket-requests";
+import { getSocketClient } from "../../src/services/socket-client";
 import { useClassicGameStore } from "../../src/store/classic-game-store";
 import { useConnectionStore } from "../../src/store/connection-store";
 import { useRoomStore } from "../../src/store/room-store";
 import { useWordGameStore } from "../../src/store/word-game-store";
+import { useTranslation } from "../../src/i18n/use-translation";
+import { localizeImpostorError } from "../../src/i18n/impostor-errors";
+import type { TranslationKey } from "../../src/i18n/locales";
 import { colors, radii, spacing, typography } from "../../src/theme";
+import {
+  canStartClassicImpostorGame,
+  clampClassicImpostorCount,
+  getClassicImpostorCountStepperMaximum,
+  getMaximumClassicImpostorCount,
+} from "../../src/utils/classic-impostor-player-limit";
 
 const INITIAL_SETTINGS: ClassicImpostorSettings = {
   impostorCount: DEFAULT_IMPOSTOR_COUNT,
@@ -49,6 +60,7 @@ const INITIAL_SETTINGS: ClassicImpostorSettings = {
 
 export default function ImpostorSettingsRoute() {
   const router = useRouter();
+  const t = useTranslation();
   const { mode } = useLocalSearchParams<{ mode?: string }>();
   const room = useRoomStore((state) => state.room);
   const playerId = useRoomStore((state) => state.playerId);
@@ -66,12 +78,58 @@ export default function ImpostorSettingsRoute() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (room?.settings.classicImpostor) {
-      setSettings(room.settings.classicImpostor);
-    } else {
-      setSettings(INITIAL_SETTINGS);
+    const savedSettings = room?.settings.classicImpostor;
+    setSettings({
+      impostorCount:
+        savedSettings?.impostorCount ?? INITIAL_SETTINGS.impostorCount,
+      discussionDurationSeconds:
+        savedSettings?.discussionDurationSeconds ??
+        INITIAL_SETTINGS.discussionDurationSeconds,
+      votingDurationSeconds:
+        savedSettings?.votingDurationSeconds ??
+        INITIAL_SETTINGS.votingDurationSeconds,
+    });
+  }, [
+    room?.code,
+    room?.settings.classicImpostor?.impostorCount,
+    room?.settings.classicImpostor?.discussionDurationSeconds,
+    room?.settings.classicImpostor?.votingDurationSeconds,
+  ]);
+
+  useEffect(() => {
+    if (!room?.code || mode === "impostor-word") {
+      return;
     }
-  }, [room?.code, room?.settings.classicImpostor]);
+
+    const roomCode = room.code;
+    const socket = getSocketClient();
+    const roomUpdated = (payload: RoomUpdatePayload) => {
+      if (payload.room.code === roomCode) {
+        setRoom(payload.room);
+      }
+    };
+
+    socket.on(ROOM_EVENTS.UPDATE, roomUpdated);
+    return () => {
+      socket.off(ROOM_EVENTS.UPDATE, roomUpdated);
+    };
+  }, [mode, room?.code, setRoom]);
+
+  const playerCount = room?.players.length ?? 0;
+  useEffect(() => {
+    if (mode === "impostor-word") {
+      return;
+    }
+    setSettings((current) => {
+      const impostorCount = clampClassicImpostorCount(
+        current.impostorCount,
+        playerCount,
+      );
+      return impostorCount === current.impostorCount
+        ? current
+        : { ...current, impostorCount };
+    });
+  }, [mode, playerCount]);
 
   if (!room || !playerId) {
     return <Redirect href="/lobby" />;
@@ -85,20 +143,22 @@ export default function ImpostorSettingsRoute() {
       <Screen>
         <View style={styles.centered}>
           <IconButton
-            accessibilityLabel="Back to games"
+            accessibilityLabel={t("impostor.setup.backToGames")}
             icon={ArrowLeft}
             onPress={() => router.replace("/games")}
           />
           <Text style={styles.title}>
-            {isHost ? "Unsupported game mode" : "Host only"}
+            {isHost
+              ? t("impostor.setup.unsupportedTitle")
+              : t("impostor.setup.hostOnly")}
           </Text>
           <Text style={styles.mutedText}>
             {isHost
-              ? "This setup route does not support the selected game mode."
-              : "Only the room host can configure and start the game."}
+              ? t("impostor.setup.unsupportedDescription")
+              : t("impostor.setup.hostOnlyDescription")}
           </Text>
           <PrimaryButton
-            title="Back to games"
+            title={t("impostor.setup.backToGames")}
             variant="secondary"
             onPress={() => router.replace("/games")}
           />
@@ -120,11 +180,22 @@ export default function ImpostorSettingsRoute() {
     (player) => player.connectionStatus === "connected",
   ).length;
   const allPlayersConnected = connectedPlayers === room.players.length;
-  const canStart =
-    connectionStatus === "connected" &&
-    room.gameStatus === "waiting" &&
-    room.players.length >= MIN_CLASSIC_IMPOSTOR_PLAYERS &&
-    allPlayersConnected;
+  const maximumImpostors = getMaximumClassicImpostorCount(room.players.length);
+  const stepperImpostorMaximum = getClassicImpostorCountStepperMaximum(
+    room.players.length,
+  );
+  const settingsAreValid =
+    classicImpostorSettingsSchema.safeParse(settings).success;
+  const canStart = canStartClassicImpostorGame({
+    isHost,
+    isConnected: connectionStatus === "connected",
+    isWaiting: room.gameStatus === "waiting",
+    playerCount: room.players.length,
+    minimumPlayerCount: MIN_CLASSIC_IMPOSTOR_PLAYERS,
+    allPlayersConnected,
+    settingsAreValid,
+    impostorCount: settings.impostorCount,
+  });
 
   const adjustSetting = (
     key: keyof ClassicImpostorSettings,
@@ -134,7 +205,13 @@ export default function ImpostorSettingsRoute() {
   ) => {
     setSettings((current) => ({
       ...current,
-      [key]: Math.min(maximum, Math.max(minimum, current[key] + amount)),
+      [key]:
+        key === "impostorCount"
+          ? clampClassicImpostorCount(
+              current.impostorCount + amount,
+              room.players.length,
+            )
+          : Math.min(maximum, Math.max(minimum, current[key] + amount)),
     }));
     setError(null);
   };
@@ -187,49 +264,61 @@ export default function ImpostorSettingsRoute() {
     <Screen scrollable contentContainerStyle={styles.content}>
       <View style={styles.header}>
         <IconButton
-          accessibilityLabel="Back to games"
+          accessibilityLabel={t("impostor.setup.backToGames")}
           icon={ArrowLeft}
           onPress={() => router.back()}
         />
-        <Chip label="Classic Impostor" variant="teal" />
+        <Chip label={t("impostor.mode.classic")} variant="teal" />
       </View>
 
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Players"
+        rightLabel={t("common.players")}
         rightValue={`${room.players.length} / ${room.settings.maxPlayers}`}
         leftValueStyle={typography.roomCode}
       />
 
       <View style={styles.intro}>
-        <Text style={styles.title}>Set the rules</Text>
+        <Text style={styles.title}>{t("impostor.setup.classicTitle")}</Text>
         <Text style={styles.mutedText}>
-          The server will validate these settings before the game begins.
+          {t("impostor.setup.classicDescription")}
         </Text>
       </View>
 
       <HudPanel style={styles.settingsPanel}>
         <Stepper
           icon={Users}
-          label="Impostors"
+          label={t("impostor.setup.impostors")}
+          t={t}
           value={`${settings.impostorCount}`}
           onDecrease={() =>
-            adjustSetting("impostorCount", -1, 1, MAX_PLAYERS_PER_ROOM - 1)
+            adjustSetting(
+              "impostorCount",
+              -1,
+              1,
+              stepperImpostorMaximum,
+            )
           }
           onIncrease={() =>
-            adjustSetting("impostorCount", 1, 1, MAX_PLAYERS_PER_ROOM - 1)
+            adjustSetting(
+              "impostorCount",
+              1,
+              1,
+              stepperImpostorMaximum,
+            )
           }
           decreaseDisabled={settings.impostorCount <= 1}
           increaseDisabled={
-            settings.impostorCount >= MAX_PLAYERS_PER_ROOM - 1
+            settings.impostorCount >= stepperImpostorMaximum
           }
         />
         <View style={styles.divider} />
         <Stepper
           icon={Timer}
-          label="Discussion"
-          value={formatDuration(settings.discussionDurationSeconds)}
+          label={t("impostor.setup.discussion")}
+          value={formatDuration(settings.discussionDurationSeconds, t)}
+          t={t}
           onDecrease={() =>
             adjustSetting(
               "discussionDurationSeconds",
@@ -258,8 +347,9 @@ export default function ImpostorSettingsRoute() {
         <View style={styles.divider} />
         <Stepper
           icon={Timer}
-          label="Voting"
-          value={formatDuration(settings.votingDurationSeconds)}
+          label={t("impostor.setup.voting")}
+          value={formatDuration(settings.votingDurationSeconds, t)}
+          t={t}
           onDecrease={() =>
             adjustSetting(
               "votingDurationSeconds",
@@ -287,35 +377,48 @@ export default function ImpostorSettingsRoute() {
 
       {room.players.length < MIN_CLASSIC_IMPOSTOR_PLAYERS ? (
         <Text style={styles.warning}>
-          At least {MIN_CLASSIC_IMPOSTOR_PLAYERS} players are required.
+          {t("impostor.setup.minimumPlayers", {
+            count: MIN_CLASSIC_IMPOSTOR_PLAYERS,
+          })}
+        </Text>
+      ) : settings.impostorCount > maximumImpostors ? (
+        <Text style={styles.warning}>
+          {t(
+            maximumImpostors === 1
+              ? "impostor.setup.impostorLimitOne"
+              : "impostor.setup.impostorLimitMany",
+            { count: maximumImpostors, players: room.players.length },
+          )}
         </Text>
       ) : !allPlayersConnected ? (
         <Text style={styles.warning}>
-          Wait for every player to reconnect before starting.
+          {t("impostor.setup.waitReconnect")}
         </Text>
       ) : null}
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting to the game server..."
-            : connectionError ?? "Connect to the game server to continue."}
+            ? t("impostor.setup.reconnecting")
+            : connectionError
+              ? localizeImpostorError(connectionError, t)
+              : t("impostor.setup.connectToContinue")}
         </Text>
       ) : null}
       {error ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(error, t)}
         </Text>
       ) : null}
 
       <PrimaryButton
-        title="Start game"
+        title={t("impostor.setup.start")}
         leftIcon={Play}
         loading={isStarting}
         disabled={!canStart}
         onPress={() => void startClassicGame()}
       />
       <PrimaryButton
-        title="Back to games"
+        title={t("impostor.setup.backToGames")}
         variant="secondary"
         onPress={() => router.replace("/games")}
       />
@@ -335,6 +438,7 @@ function WordImpostorSettingsScreen({
   connectionError: string | null;
 }) {
   const router = useRouter();
+  const t = useTranslation();
   const setRoom = useRoomStore((state) => state.setRoom);
   const resetClassicGame = useClassicGameStore((state) => state.reset);
   const resetWordGame = useWordGameStore((state) => state.reset);
@@ -461,12 +565,12 @@ function WordImpostorSettingsScreen({
     return (
       <Screen>
         <View style={styles.centered}>
-          <Text style={styles.title}>Host only</Text>
+          <Text style={styles.title}>{t("impostor.setup.hostOnly")}</Text>
           <Text style={styles.mutedText}>
-            Only the room host can configure and start Word Impostor.
+            {t("impostor.setup.hostOnlyDescription")}
           </Text>
           <PrimaryButton
-            title="Back to lobby"
+            title={t("games.backToLobby")}
             variant="secondary"
             onPress={() => router.replace("/lobby")}
           />
@@ -479,36 +583,38 @@ function WordImpostorSettingsScreen({
     <Screen scrollable contentContainerStyle={styles.content}>
       <View style={styles.header}>
         <IconButton
-          accessibilityLabel="Back to games"
+          accessibilityLabel={t("impostor.setup.backToGames")}
           icon={ArrowLeft}
           onPress={() => router.back()}
         />
-        <Chip label="Word Impostor" variant="teal" />
+        <Chip label={t("impostor.mode.word")} variant="teal" />
       </View>
 
       <TopHudBar
-        leftLabel="Room code"
+        leftLabel={t("common.roomCode")}
         leftValue={room.code}
-        rightLabel="Players"
+        rightLabel={t("common.players")}
         rightValue={`${room.players.length} / ${room.settings.maxPlayers}`}
         leftValueStyle={typography.roomCode}
       />
 
       <View style={styles.intro}>
-        <Text style={styles.title}>Set the word rules</Text>
+        <Text style={styles.title}>{t("impostor.setup.wordTitle")}</Text>
         <Text style={styles.mutedText}>
-          Civilians share a secret word. Impostors will not receive it.
+          {t("impostor.setup.wordDescription")}
         </Text>
       </View>
 
       <HudPanel style={styles.settingsPanel}>
-        <Text style={styles.stepperText}>Word category</Text>
+        <Text style={styles.stepperText}>
+          {t("impostor.setup.category")}
+        </Text>
         <View style={styles.categoryGrid}>
           {WORD_IMPOSTOR_CATEGORIES.map((category) => (
             <Pressable
               key={category}
               accessibilityRole="button"
-              accessibilityLabel={`Word category ${formatCategory(category)}`}
+              accessibilityLabel={`${t("impostor.setup.category")} ${formatCategory(category, t)}`}
               accessibilityState={{ selected: settings.category === category }}
               onPress={() => selectCategory(category)}
               style={[
@@ -526,7 +632,7 @@ function WordImpostorSettingsScreen({
                     : null,
                 ]}
               >
-                {formatCategory(category)}
+                {formatCategory(category, t)}
               </Text>
             </Pressable>
           ))}
@@ -534,7 +640,8 @@ function WordImpostorSettingsScreen({
         <View style={styles.divider} />
         <Stepper
           icon={Users}
-          label="Impostors"
+          label={t("impostor.setup.impostors")}
+          t={t}
           value={`${settings.impostorCount}`}
           onDecrease={() =>
             adjustSetting(
@@ -560,8 +667,9 @@ function WordImpostorSettingsScreen({
         <View style={styles.divider} />
         <Stepper
           icon={Timer}
-          label="Discussion"
-          value={formatDuration(settings.discussionDurationSeconds)}
+          label={t("impostor.setup.discussion")}
+          value={formatDuration(settings.discussionDurationSeconds, t)}
+          t={t}
           onDecrease={() =>
             adjustSetting(
               "discussionDurationSeconds",
@@ -590,8 +698,9 @@ function WordImpostorSettingsScreen({
         <View style={styles.divider} />
         <Stepper
           icon={Timer}
-          label="Voting"
-          value={formatDuration(settings.votingDurationSeconds)}
+          label={t("impostor.setup.voting")}
+          value={formatDuration(settings.votingDurationSeconds, t)}
+          t={t}
           onDecrease={() =>
             adjustSetting(
               "votingDurationSeconds",
@@ -620,39 +729,45 @@ function WordImpostorSettingsScreen({
 
       {room.players.length < MIN_WORD_IMPOSTOR_PLAYERS ? (
         <Text style={styles.warning}>
-          At least {MIN_WORD_IMPOSTOR_PLAYERS} players are required.
+          {t("impostor.setup.minimumPlayers", {
+            count: MIN_WORD_IMPOSTOR_PLAYERS,
+          })}
         </Text>
       ) : settings.impostorCount > serverImpostorMaximum ? (
         <Text style={styles.warning}>
-          Reduce the impostors to {serverImpostorMaximum} for this room size.
+          {t("impostor.setup.reduceImpostors", {
+            count: serverImpostorMaximum,
+          })}
         </Text>
       ) : !allPlayersConnected ? (
         <Text style={styles.warning}>
-          Wait for every player to reconnect before starting.
+          {t("impostor.setup.waitReconnect")}
         </Text>
       ) : null}
       {connectionStatus !== "connected" ? (
         <Text style={styles.warning}>
           {connectionStatus === "reconnecting"
-            ? "Reconnecting to the game server..."
-            : connectionError ?? "Connect to the game server to continue."}
+            ? t("impostor.setup.reconnecting")
+            : connectionError
+              ? localizeImpostorError(connectionError, t)
+              : t("impostor.setup.connectToContinue")}
         </Text>
       ) : null}
       {error ? (
         <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+          {localizeImpostorError(error, t)}
         </Text>
       ) : null}
 
       <PrimaryButton
-        title="Start game"
+        title={t("impostor.setup.start")}
         leftIcon={Play}
         loading={isStarting}
         disabled={!canStart}
         onPress={() => void startWordGame()}
       />
       <PrimaryButton
-        title="Back to games"
+        title={t("impostor.setup.backToGames")}
         variant="secondary"
         onPress={() => router.replace("/games")}
       />
@@ -664,6 +779,7 @@ interface StepperProps {
   icon: LucideIcon;
   label: string;
   value: string;
+  t: ReturnType<typeof useTranslation>;
   onDecrease: () => void;
   onIncrease: () => void;
   decreaseDisabled: boolean;
@@ -674,6 +790,7 @@ function Stepper({
   icon: Icon,
   label,
   value,
+  t,
   onDecrease,
   onIncrease,
   decreaseDisabled,
@@ -688,14 +805,14 @@ function Stepper({
       <View style={styles.stepperControls}>
         <StepButton
           icon={Minus}
-          label={`Decrease ${label.toLowerCase()}`}
+          label={t("impostor.setup.decrease", { setting: label })}
           disabled={decreaseDisabled}
           onPress={onDecrease}
         />
         <Text style={styles.stepperValue}>{value}</Text>
         <StepButton
           icon={Plus}
-          label={`Increase ${label.toLowerCase()}`}
+          label={t("impostor.setup.increase", { setting: label })}
           disabled={increaseDisabled}
           onPress={onIncrease}
         />
@@ -729,16 +846,31 @@ function StepButton({
   );
 }
 
-function formatDuration(seconds: number): string {
+function formatDuration(
+  seconds: number,
+  t: ReturnType<typeof useTranslation>,
+): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return remainder === 0
-    ? `${minutes} min`
-    : `${minutes}:${String(remainder).padStart(2, "0")} min`;
+    ? t("impostor.setup.durationMinutes", { minutes })
+    : t("impostor.setup.durationMinutesSeconds", {
+        minutes,
+        seconds: String(remainder).padStart(2, "0"),
+      });
 }
 
-function formatCategory(category: WordCategory): string {
-  return `${category.charAt(0).toUpperCase()}${category.slice(1)}`;
+function formatCategory(
+  category: WordCategory,
+  t: ReturnType<typeof useTranslation>,
+): string {
+  const categoryKeys: Record<WordCategory, TranslationKey> = {
+    animals: "impostor.setup.category.animals",
+    food: "impostor.setup.category.food",
+    places: "impostor.setup.category.places",
+    objects: "impostor.setup.category.objects",
+  };
+  return t(categoryKeys[category]);
 }
 
 const styles = StyleSheet.create({

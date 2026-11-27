@@ -27,6 +27,13 @@ import type {
 } from "@impostor/api";
 import { AppError } from "../../utils/app-error.js";
 import { RoomService } from "../../rooms/room-service.js";
+import type { RoomGameStatusReservation } from "../../rooms/room-service.js";
+import type { RoomPersistenceCommands } from "../../rooms/room-persistence-commands.js";
+import {
+  persistFinishedGameReturnToLobby,
+  persistGameCompletion,
+  persistGameStatusTransition,
+} from "../../rooms/persist-game-status-transition.js";
 
 type ClassicGameSession = Extract<GameSession, { state: ImpostorGameState }>;
 type ImpostorRole = ImpostorRoleAssignmentPayload["role"];
@@ -82,6 +89,17 @@ export interface ClassicGameResumeSnapshot {
   reveal?: ImpostorRevealPayload;
 }
 
+export interface PreparedClassicGameStart {
+  readonly roomCode: RoomCode;
+  readonly gameId: GameSessionId;
+}
+
+interface ClassicGameStartPlan {
+  readonly socketId: string;
+  readonly game: ClassicGameRecord;
+  readonly roleRevealEndsAt: Date;
+}
+
 interface ClassicGameRecord {
   roomCode: RoomCode;
   session: ClassicGameSession;
@@ -93,6 +111,7 @@ interface ClassicGameRecord {
   eliminationHistory: ClassicEliminationHistoryEntry[];
   voteCandidates?: Set<PlayerId>;
   voteAttempt: number;
+  votingPhaseId: number;
   result?: GameResult;
   timer?: GameTimer;
 }
@@ -115,14 +134,36 @@ const defaultRuntime: GameRuntime = {
 export class ClassicImpostorService {
   private readonly currentGames = new Map<RoomCode, ClassicGameRecord>();
   private readonly gamesById = new Map<GameSessionId, ClassicGameRecord>();
+  private readonly pendingFinishes = new Map<GameSessionId, Promise<void>>();
+  private readonly pendingLobbyReturns = new Map<RoomCode, Promise<Room>>();
+  private readonly preparedStarts = new WeakMap<
+    PreparedClassicGameStart,
+    ClassicGameStartPlan
+  >();
 
   constructor(
     private readonly rooms: RoomService,
     private readonly events: ClassicGameEvents,
     private readonly runtime: GameRuntime = defaultRuntime,
-  ) {}
+    private readonly persistenceCommands?: RoomPersistenceCommands,
+  ) {
+    this.rooms.onGameplaySuspended((suspension) => {
+      const game = this.currentGames.get(suspension.roomCode);
+      if (game && game.session.id === suspension.gameId) {
+        this.clearTimer(game);
+      }
+    });
+  }
 
   startGame(roomCode: RoomCode, socketId: string): ClassicGameSession {
+    return this.commitPreparedStart(this.prepareStart(roomCode, socketId));
+  }
+
+  prepareStart(
+    roomCode: RoomCode,
+    socketId: string,
+  ): PreparedClassicGameStart {
+    this.rooms.assertGameplayAvailable(roomCode);
     const roomBeforeStart = this.rooms.getPublicRoom(roomCode);
     if (!roomBeforeStart) {
       throw new AppError("ROOM_NOT_FOUND", "Room does not exist.");
@@ -212,9 +253,65 @@ export class ClassicImpostorService {
       votingHistory: [],
       eliminationHistory: [],
       voteAttempt: 0,
+      votingPhaseId: 0,
     };
 
-    const room = this.rooms.beginGame(roomCode, socketId, sessionId);
+    const prepared = Object.freeze({ roomCode, gameId: sessionId });
+    this.preparedStarts.set(prepared, {
+      socketId,
+      game,
+      roleRevealEndsAt,
+    });
+    return prepared;
+  }
+
+  discardPreparedStart(prepared: PreparedClassicGameStart): void {
+    this.preparedStarts.delete(prepared);
+  }
+
+  commitPreparedStart(
+    prepared: PreparedClassicGameStart,
+    reservation?: RoomGameStatusReservation,
+  ): ClassicGameSession {
+    this.rooms.assertGameplayAvailable(prepared.roomCode, prepared.gameId);
+    const plan = this.preparedStarts.get(prepared);
+    if (!plan) {
+      throw new AppError("GAME_NOT_ACTIVE", "Prepared game start is no longer available.");
+    }
+    this.preparedStarts.delete(prepared);
+    const { game, socketId, roleRevealEndsAt } = plan;
+    const { roomCode } = prepared;
+    const sessionId = game.session.id;
+    try {
+      this.schedule(
+        game,
+        Math.max(0, roleRevealEndsAt.getTime() - this.runtime.now().getTime()),
+        () => {
+          void this.beginDiscussion(game, roleRevealEndsAt).catch((error: unknown) =>
+            this.handleDurableActivationFailure(roomCode, sessionId, error),
+          );
+        },
+      );
+    } catch (error) {
+      this.clearTimer(game);
+      throw error;
+    }
+
+    let room: Room;
+    try {
+      room = this.rooms.beginImpostorGame(
+        roomCode,
+        socketId,
+        sessionId,
+        "impostor-classic",
+        reservation,
+      );
+    } catch (error) {
+      this.clearTimer(game);
+      throw error;
+    }
+
+    const previousGame = this.currentGames.get(roomCode);
     if (previousGame) {
       this.clearTimer(previousGame);
       this.gamesById.delete(previousGame.session.id);
@@ -224,13 +321,10 @@ export class ClassicImpostorService {
 
     this.events.roomUpdated(room);
     this.events.gameStarted(roomCode, {
-      session: this.copySession(session),
+      session: this.copySession(game.session),
     });
-    this.schedule(game, ROLE_REVEAL_DURATION_SECONDS * 1_000, () =>
-      this.beginDiscussion(game),
-    );
 
-    return this.copySession(session);
+    return this.copySession(game.session);
   }
 
   requestRole(
@@ -238,6 +332,7 @@ export class ClassicImpostorService {
     sessionId: GameSessionId,
     playerId: PlayerId,
   ): ImpostorRoleAssignmentPayload {
+    this.rooms.assertGameplayAvailable(roomCode, sessionId);
     const game = this.gamesById.get(sessionId);
     const role =
       game?.roomCode === roomCode ? game.roles.get(playerId) : undefined;
@@ -251,21 +346,163 @@ export class ClassicImpostorService {
     return { sessionId, role };
   }
 
+  returnToLobby(roomCode: RoomCode, socketId: string): Room {
+    this.rooms.assertGameplayAvailable(
+      roomCode,
+      this.currentGames.get(roomCode)?.session.id,
+    );
+    if (this.persistenceCommands) {
+      throw new AppError(
+        "FEATURE_UNAVAILABLE",
+        "Durable rooms must use the persisted lobby transition.",
+      );
+    }
+    this.rooms.assertHost(roomCode, socketId);
+    const room = this.rooms.getPublicRoom(roomCode);
+    const game = this.currentGames.get(roomCode);
+    if (
+      !room ||
+      room.gameStatus !== "finished" ||
+      !game ||
+      game.session.status !== "finished" ||
+      room.currentGameId !== game.session.id
+    ) {
+      throw new AppError(
+        "GAME_NOT_ACTIVE",
+        "Only a finished Classic Impostor game can return to the lobby.",
+      );
+    }
+
+    this.clearTimer(game);
+    this.currentGames.delete(roomCode);
+    this.gamesById.delete(game.session.id);
+    return this.rooms.returnFinishedImpostorGameToLobby(
+      roomCode,
+      socketId,
+      game.session.id,
+    );
+  }
+
+  returnToLobbyPersisted(
+    roomCode: RoomCode,
+    socketId: string,
+  ): Promise<Room> {
+    this.rooms.assertGameplayAvailable(
+      roomCode,
+      this.currentGames.get(roomCode)?.session.id,
+    );
+    const pending = this.pendingLobbyReturns.get(roomCode);
+    if (pending) {
+      return pending;
+    }
+    const operation = this.returnToLobbyPersistedCore(roomCode, socketId);
+    const tracked = operation.finally(() => {
+      if (this.pendingLobbyReturns.get(roomCode) === tracked) {
+        this.pendingLobbyReturns.delete(roomCode);
+      }
+    });
+    this.pendingLobbyReturns.set(roomCode, tracked);
+    return tracked;
+  }
+
+  private async returnToLobbyPersistedCore(
+    roomCode: RoomCode,
+    socketId: string,
+  ): Promise<Room> {
+    this.rooms.assertGameplayAvailable(
+      roomCode,
+      this.currentGames.get(roomCode)?.session.id,
+    );
+    this.rooms.assertHost(roomCode, socketId);
+    const room = this.rooms.getPublicRoom(roomCode);
+    if (room?.gameStatus === "waiting" && !room.currentGameId) {
+      return room;
+    }
+    const game = this.currentGames.get(roomCode);
+    if (
+      !room
+      || room.gameStatus !== "finished"
+      || !game
+      || game.session.status !== "finished"
+      || room.currentGameId !== game.session.id
+    ) {
+      throw new AppError(
+        "GAME_NOT_ACTIVE",
+        "Only a finished Classic Impostor game can return to the lobby.",
+      );
+    }
+    const commands = this.persistenceCommands;
+    if (!commands) {
+      return this.returnToLobby(roomCode, socketId);
+    }
+
+    return persistFinishedGameReturnToLobby(
+      this.rooms,
+      commands,
+      roomCode,
+      socketId,
+      game.session.id,
+      (reservation) => {
+        const lobby = this.rooms.returnFinishedGameToLobby(
+          roomCode,
+          socketId,
+          game.session.id,
+          reservation,
+        );
+        this.clearTimer(game);
+        this.currentGames.delete(roomCode);
+        this.gamesById.delete(game.session.id);
+        return lobby;
+      },
+    );
+  }
+
   submitVote(
     roomCode: RoomCode,
     voterId: PlayerId,
     targetPlayerId: PlayerId,
+    sessionId?: GameSessionId,
+    expectedVotingEndsAt?: string,
+    expectedVotingPhaseId?: number,
   ): void {
+    this.rooms.assertGameplayAvailable(
+      roomCode,
+      sessionId ?? this.currentGames.get(roomCode)?.session.id,
+    );
     const game = this.currentGames.get(roomCode);
     if (
       !game ||
+      (sessionId !== undefined && game.session.id !== sessionId) ||
       game.session.status !== "in_progress" ||
       game.session.state.phase !== "voting"
     ) {
       throw new AppError("GAME_NOT_ACTIVE", "Voting is not currently active.");
     }
-    if (!game.roles.has(voterId) || game.eliminatedPlayerIds.has(voterId)) {
+    const votingEndsAt = game.session.state.votingEndsAt;
+    if (
+      !votingEndsAt ||
+      (expectedVotingEndsAt !== undefined &&
+        expectedVotingEndsAt !== votingEndsAt) ||
+      game.session.state.votingPhaseId !== game.votingPhaseId ||
+      (expectedVotingPhaseId !== undefined &&
+        expectedVotingPhaseId !== game.votingPhaseId)
+    ) {
+      throw new AppError("GAME_NOT_ACTIVE", "Voting is not currently active.");
+    }
+    if (
+      !game.roles.has(voterId) ||
+      game.eliminatedPlayerIds.has(voterId) ||
+      !this.rooms.getSocketIdForPlayer(roomCode, voterId)
+    ) {
       throw new AppError("NOT_AUTHORIZED", "This player is not eligible to vote.");
+    }
+    const deadline = Date.parse(votingEndsAt);
+    if (
+      !Number.isFinite(deadline) ||
+      this.runtime.now().getTime() >= deadline
+    ) {
+      this.resolveVote(game, game.votingPhaseId);
+      throw new AppError("GAME_NOT_ACTIVE", "Voting is not currently active.");
     }
     if (game.votes.has(voterId)) {
       throw new AppError("DUPLICATE_VOTE", "A vote has already been submitted this round.");
@@ -284,11 +521,17 @@ export class ClassicImpostorService {
     }
 
     game.votes.set(voterId, targetPlayerId);
-    game.session.state.votesSubmitted = game.votes.size;
+    const eligibleVoters = this.getEligibleVoterIds(game);
+    game.session.state.votesSubmitted = eligibleVoters.filter((playerId) =>
+      game.votes.has(playerId),
+    ).length;
     this.emitState(game);
 
-    if (game.votes.size >= this.getEligibleVoterIds(game).length) {
-      this.resolveVote(game);
+    if (
+      eligibleVoters.length > 0 &&
+      eligibleVoters.every((playerId) => game.votes.has(playerId))
+    ) {
+      this.resolveVote(game, game.votingPhaseId, true);
     }
   }
 
@@ -297,7 +540,11 @@ export class ClassicImpostorService {
     playerId: PlayerId,
   ): ClassicGameResumeSnapshot | undefined {
     const game = this.currentGames.get(roomCode);
-    if (!game || !game.roles.has(playerId)) {
+    if (
+      !game
+      || this.rooms.isGameplaySuspended(roomCode, game.session.id)
+      || !game.roles.has(playerId)
+    ) {
       return undefined;
     }
 
@@ -336,7 +583,16 @@ export class ClassicImpostorService {
     };
   }
 
-  onPlayerRemoved(roomCode: RoomCode, roomStillExists: boolean): void {
+  onPlayerRemoved(
+    roomCode: RoomCode,
+    roomStillExists: boolean,
+  ): void | Promise<void> {
+    if (this.rooms.isGameplaySuspended(
+      roomCode,
+      this.currentGames.get(roomCode)?.session.id,
+    )) {
+      return;
+    }
     const game = this.currentGames.get(roomCode);
     if (!roomStillExists) {
       this.onRoomDeleted(roomCode);
@@ -349,7 +605,42 @@ export class ClassicImpostorService {
       return;
     }
 
-    this.finishGame(game, "cancelled", []);
+    return this.finishGame(game, "cancelled", []);
+  }
+
+  onPlayerConnectionChanged(roomCode: RoomCode): void {
+    if (this.rooms.isGameplaySuspended(
+      roomCode,
+      this.currentGames.get(roomCode)?.session.id,
+    )) {
+      return;
+    }
+    const game = this.currentGames.get(roomCode);
+    if (!game || game.session.status === "finished") {
+      return;
+    }
+
+    const eligibleVoters = this.getEligibleVoterIds(game);
+    const votesSubmitted = eligibleVoters.filter((playerId) =>
+      game.votes.has(playerId),
+    ).length;
+    const stateChanged =
+      game.session.state.eligibleVoters !== eligibleVoters.length ||
+      game.session.state.votesSubmitted !== votesSubmitted;
+
+    game.session.state.eligibleVoters = eligibleVoters.length;
+    game.session.state.votesSubmitted = votesSubmitted;
+    if (stateChanged) {
+      this.emitState(game);
+    }
+
+    if (
+      game.session.state.phase === "voting" &&
+      eligibleVoters.length > 0 &&
+      eligibleVoters.every((playerId) => game.votes.has(playerId))
+    ) {
+      this.resolveVote(game, game.votingPhaseId, true);
+    }
   }
 
   onRoomDeleted(roomCode: RoomCode): void {
@@ -370,25 +661,82 @@ export class ClassicImpostorService {
     this.gamesById.clear();
   }
 
-  private beginDiscussion(game: ClassicGameRecord): void {
+  private async beginDiscussion(
+    game: ClassicGameRecord,
+    scheduledStartsAt?: Date,
+  ): Promise<void> {
     if (!this.isCurrentActiveGame(game)) {
       return;
     }
+    const roomBeforeActivation = this.rooms.getPublicRoom(game.roomCode);
+    if (
+      !roomBeforeActivation
+      || roomBeforeActivation.currentGameId !== game.session.id
+      || (
+        roomBeforeActivation.gameStatus !== "starting"
+        && roomBeforeActivation.gameStatus !== "in_progress"
+      )
+    ) {
+      throw new AppError("GAME_NOT_ACTIVE", "The game can no longer start.");
+    }
     this.clearTimer(game);
-    if (game.session.status === "starting") {
-      const room = this.rooms.activateGame(game.roomCode, game.session.id);
-      this.events.roomUpdated(room);
-      game.session.status = "in_progress";
+
+    const startsAt = scheduledStartsAt ?? this.runtime.now();
+    const now = this.runtime.now();
+    if (startsAt.getTime() > now.getTime()) {
+      this.schedule(game, startsAt.getTime() - now.getTime(), () =>
+        this.beginDiscussion(game, startsAt).catch((error: unknown) =>
+          this.handleDurableActivationFailure(
+            game.roomCode,
+            game.session.id,
+            error,
+          ),
+        ),
+      );
+      return;
     }
 
-    const now = this.runtime.now();
-    const endsAt = this.addSeconds(now, game.settings.discussionDurationSeconds);
+    if (game.session.status === "starting") {
+      if (this.persistenceCommands) {
+        await persistGameStatusTransition(
+          this.rooms,
+          this.persistenceCommands,
+          game.roomCode,
+          game.session.id,
+          (reservation) => {
+            const room = this.rooms.activateGame(
+              game.roomCode,
+              game.session.id,
+              reservation,
+            );
+            this.events.roomUpdated(room);
+            game.session.status = "in_progress";
+          },
+        );
+      } else {
+        const room = this.rooms.activateGame(game.roomCode, game.session.id);
+        this.events.roomUpdated(room);
+        game.session.status = "in_progress";
+      }
+    }
+
+    const endsAt = this.addSeconds(
+      startsAt,
+      game.settings.discussionDurationSeconds,
+    );
+    if (endsAt.getTime() <= this.runtime.now().getTime()) {
+      delete game.session.state.roleRevealEndsAt;
+      this.beginVoting(game, undefined, endsAt);
+      return;
+    }
+
     game.session.state.phase = "discussion";
     game.session.state.discussionEndsAt = endsAt.toISOString();
     game.session.state.votesSubmitted = 0;
     game.session.state.eligibleVoters = this.getEligibleVoterIds(game).length;
     delete game.session.state.roleRevealEndsAt;
     delete game.session.state.votingEndsAt;
+    delete game.session.state.votingPhaseId;
     delete game.session.state.revotePlayerIds;
     game.votes.clear();
     game.voteCandidates = undefined;
@@ -396,37 +744,49 @@ export class ClassicImpostorService {
 
     const discussion: DiscussionPayload = {
       sessionId: game.session.id,
-      startsAt: now.toISOString(),
+      startsAt: startsAt.toISOString(),
       endsAt: endsAt.toISOString(),
     };
     this.events.discussionStarted(game.roomCode, discussion);
     this.emitState(game);
-    this.schedule(game, game.settings.discussionDurationSeconds * 1_000, () =>
-      this.beginVoting(game),
+    this.schedule(
+      game,
+      Math.max(0, endsAt.getTime() - this.runtime.now().getTime()),
+      () => this.beginVoting(game, undefined, endsAt),
     );
   }
 
   private beginVoting(
     game: ClassicGameRecord,
     tiedPlayerIds?: PlayerId[],
+    scheduledStartsAt?: Date,
   ): void {
     if (!this.isCurrentActiveGame(game)) {
       return;
     }
     this.clearTimer(game);
 
-    const eligibleVoters = this.getEligibleVoterIds(game);
-    if (eligibleVoters.length === 0) {
-      this.finishGame(game, "cancelled", []);
+    const now = this.runtime.now();
+    const startsAt = scheduledStartsAt ?? now;
+    if (startsAt.getTime() > now.getTime()) {
+      this.schedule(game, startsAt.getTime() - now.getTime(), () =>
+        this.beginVoting(game, tiedPlayerIds, startsAt),
+      );
       return;
     }
 
-    const now = this.runtime.now();
-    const endsAt = this.addSeconds(now, game.settings.votingDurationSeconds);
+    const eligibleVoters = this.getEligibleVoterIds(game);
+    const endsAt = this.addSeconds(
+      startsAt,
+      game.settings.votingDurationSeconds,
+    );
+    game.votingPhaseId += 1;
+    const votingPhaseId = game.votingPhaseId;
     game.session.state.phase = "voting";
     game.session.state.votesSubmitted = 0;
     game.session.state.eligibleVoters = eligibleVoters.length;
     game.session.state.votingEndsAt = endsAt.toISOString();
+    game.session.state.votingPhaseId = votingPhaseId;
     delete game.session.state.discussionEndsAt;
     if (tiedPlayerIds) {
       game.voteCandidates = new Set(tiedPlayerIds);
@@ -436,21 +796,51 @@ export class ClassicImpostorService {
       delete game.session.state.revotePlayerIds;
     }
     game.votes.clear();
+    delete game.session.state.roleRevealEndsAt;
 
     this.emitState(game);
-    this.schedule(game, game.settings.votingDurationSeconds * 1_000, () =>
-      this.resolveVote(game),
+    const remainingMs = endsAt.getTime() - this.runtime.now().getTime();
+    if (remainingMs <= 0) {
+      this.resolveVote(game, votingPhaseId);
+      return;
+    }
+    this.schedule(game, remainingMs, () =>
+      this.resolveVote(game, votingPhaseId),
     );
   }
 
-  private resolveVote(game: ClassicGameRecord): void {
+  private resolveVote(
+    game: ClassicGameRecord,
+    votingPhaseId: number,
+    allowBeforeDeadline = false,
+  ): void {
     if (
       !this.isCurrentActiveGame(game) ||
-      game.session.state.phase !== "voting"
+      game.session.state.phase !== "voting" ||
+      game.votingPhaseId !== votingPhaseId
     ) {
       return;
     }
+
+    const votingEndsAt = game.session.state.votingEndsAt;
+    if (!votingEndsAt) {
+      return;
+    }
+    const deadline = Date.parse(votingEndsAt);
+    if (!Number.isFinite(deadline)) {
+      return;
+    }
+    const remainingMs = deadline - this.runtime.now().getTime();
+    if (!allowBeforeDeadline && remainingMs > 0) {
+      this.schedule(game, remainingMs, () =>
+        this.resolveVote(game, votingPhaseId),
+      );
+      return;
+    }
+
     this.clearTimer(game);
+    delete game.session.state.votingEndsAt;
+    delete game.session.state.votingPhaseId;
 
     const candidates = [...game.roles.keys()].filter(
       (playerId) =>
@@ -600,38 +990,104 @@ export class ClassicImpostorService {
     game: ClassicGameRecord,
     outcome: GameResult["outcome"],
     winnerPlayerIds: PlayerId[],
-  ): void {
+  ): Promise<void> {
     if (game.session.status === "finished") {
-      return;
+      return Promise.resolve();
     }
-    this.clearTimer(game);
-    const endedAt = this.runtime.now().toISOString();
-    game.session.status = "finished";
-    game.session.endedAt = endedAt;
-    game.session.state.phase = "reveal";
-    delete game.session.state.roleRevealEndsAt;
-    delete game.session.state.discussionEndsAt;
-    delete game.session.state.votingEndsAt;
-    delete game.session.state.revotePlayerIds;
-    const room = this.rooms.finishGame(game.roomCode, game.session.id);
-    if (room) {
-      this.events.roomUpdated(room);
+    const existing = this.pendingFinishes.get(game.session.id);
+    if (existing) {
+      return existing;
     }
 
-    const result: GameResult = {
-      gameId: game.session.id,
-      roomCode: game.roomCode,
-      gameMode: "impostor-classic",
-      outcome,
-      winnerPlayerIds: [...winnerPlayerIds],
-      endedAt,
-    };
-    game.result = result;
-    this.emitState(game);
-    this.events.gameEnded(game.roomCode, {
-      result: this.copyResult(result),
+    const operation = this.finishGameCore(game, outcome, winnerPlayerIds);
+    const tracked = operation.finally(() => {
+      if (this.pendingFinishes.get(game.session.id) === tracked) {
+        this.pendingFinishes.delete(game.session.id);
+      }
     });
-    this.events.rolesRevealed(game.roomCode, this.toFinalReveal(game));
+    this.pendingFinishes.set(game.session.id, tracked);
+    void tracked.catch((error: unknown) => {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          event: "classic_game_completion_failed",
+          roomCode: game.roomCode,
+          gameId: game.session.id,
+          error: error instanceof AppError
+            ? error.code
+            : error instanceof Error
+              ? error.name
+              : "unknown",
+        }),
+      );
+    });
+    return tracked;
+  }
+
+  private async finishGameCore(
+    game: ClassicGameRecord,
+    outcome: GameResult["outcome"],
+    winnerPlayerIds: PlayerId[],
+  ): Promise<void> {
+    this.clearTimer(game);
+    const commit = (reservation?: RoomGameStatusReservation) => {
+      const room = this.rooms.finishGame(
+        game.roomCode,
+        game.session.id,
+        reservation,
+      );
+      if (!room) {
+        throw new AppError("GAME_NOT_ACTIVE", "The Classic game is no longer current.");
+      }
+      const endedAt = this.runtime.now().toISOString();
+      game.session.status = "finished";
+      game.session.endedAt = endedAt;
+      game.session.state.phase = "reveal";
+      delete game.session.state.roleRevealEndsAt;
+      delete game.session.state.discussionEndsAt;
+      delete game.session.state.votingEndsAt;
+      delete game.session.state.votingPhaseId;
+      delete game.session.state.revotePlayerIds;
+
+      const result: GameResult = {
+        gameId: game.session.id,
+        roomCode: game.roomCode,
+        gameMode: "impostor-classic",
+        outcome,
+        winnerPlayerIds: [...winnerPlayerIds],
+        endedAt,
+      };
+      game.result = result;
+      this.events.roomUpdated(room);
+      this.emitState(game);
+      this.events.gameEnded(game.roomCode, {
+        result: this.copyResult(result),
+      });
+      this.events.rolesRevealed(game.roomCode, this.toFinalReveal(game));
+    };
+
+    if (this.persistenceCommands) {
+      const room = this.rooms.getPublicRoom(game.roomCode);
+      if (!room || room.currentGameId !== game.session.id) {
+        throw new AppError("GAME_NOT_ACTIVE", "The Classic game is no longer current.");
+      }
+      if (room.gameStatus !== "starting" && room.gameStatus !== "in_progress") {
+        if (room.gameStatus === "finished") {
+          return;
+        }
+        throw new AppError("GAME_NOT_ACTIVE", "The Classic game cannot be finished.");
+      }
+      await persistGameCompletion(
+        this.rooms,
+        this.persistenceCommands,
+        game.roomCode,
+        game.session.id,
+        room.gameStatus,
+        (reservation) => commit(reservation),
+      );
+      return;
+    }
+    commit();
   }
 
   private toFinalReveal(game: ClassicGameRecord): ImpostorRevealPayload {
@@ -693,14 +1149,17 @@ export class ClassicImpostorService {
 
   private getEligibleVoterIds(game: ClassicGameRecord): PlayerId[] {
     return [...game.roles.keys()].filter(
-      (playerId) => !game.eliminatedPlayerIds.has(playerId),
+      (playerId) =>
+        !game.eliminatedPlayerIds.has(playerId) &&
+        this.rooms.getSocketIdForPlayer(game.roomCode, playerId) !== undefined,
     );
   }
 
   private isCurrentActiveGame(game: ClassicGameRecord): boolean {
     return (
       this.currentGames.get(game.roomCode) === game &&
-      game.session.status !== "finished"
+      game.session.status !== "finished" &&
+      !this.rooms.isGameplaySuspended(game.roomCode, game.session.id)
     );
   }
 
@@ -710,10 +1169,53 @@ export class ClassicImpostorService {
     callback: () => void,
   ): void {
     this.clearTimer(game);
-    game.timer = this.runtime.schedule(() => {
+    if (this.rooms.isGameplaySuspended(game.roomCode, game.session.id)) {
+      return;
+    }
+    let timer: GameTimer;
+    timer = this.runtime.schedule(() => {
+      if (game.timer !== timer) {
+        return;
+      }
       game.timer = undefined;
+      if (this.rooms.isGameplaySuspended(game.roomCode, game.session.id)) {
+        return;
+      }
       callback();
     }, delayMs);
+    game.timer = timer;
+  }
+
+  private handleDurableActivationFailure(
+    roomCode: RoomCode,
+    gameId: GameSessionId,
+    error: unknown,
+  ): void {
+    if (this.persistenceCommands) {
+      this.rooms.fenceRoom(roomCode);
+      try {
+        this.persistenceCommands.fenceRoom(roomCode);
+      } catch (fenceError) {
+        console.error(
+          JSON.stringify({
+            level: "error",
+            event: "durable_game_activation_fence_failed",
+            roomCode,
+            gameId,
+            error: fenceError instanceof Error ? fenceError.message : "unknown",
+          }),
+        );
+      }
+    }
+    console.error(
+      JSON.stringify({
+        level: "error",
+        event: "game_activation_failed",
+        roomCode,
+        gameId,
+        error: error instanceof Error ? error.message : "unknown",
+      }),
+    );
   }
 
   private clearTimer(game: ClassicGameRecord): void {
